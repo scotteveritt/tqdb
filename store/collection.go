@@ -41,8 +41,9 @@ type Collection struct {
 	idIndex    map[string]int
 	deleted    []bool
 
-	// Filter index (built by CreateIndex, nil until then).
+	// Indexes (built by CreateIndex, nil until then).
 	filterIdx *filterIndex
+	ivfIdx    *ivfIndex
 }
 
 // filterIndex provides O(1) lookup for Eq/In filter operations.
@@ -304,36 +305,65 @@ func (c *Collection) Count() int {
 	return len(c.idIndex)
 }
 
-// CreateIndex builds filter indexes on the specified fields.
-// After calling CreateIndex, SearchWithOptions will use inverted index
-// lookups for Eq/In filters instead of scanning all vectors.
+// CreateIndex builds filter indexes and IVF partitions for fast search.
+// After calling CreateIndex, searches use partition pruning (O(√N) instead of O(N))
+// and inverted index lookups for Eq/In filters (O(1) instead of O(N)).
 // Matches VS2's CreateIndex API.
 func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	idx := &filterIndex{
-		fields: make(map[string]map[any][]int, len(cfg.FilterFields)),
-	}
+	n := len(c.norms)
 
-	// Initialize each field's inverted index.
-	for _, field := range cfg.FilterFields {
-		idx.fields[field] = make(map[any][]int)
-	}
-
-	// Build the inverted indexes from existing data.
-	for i, data := range c.dataFields {
-		if c.deleted[i] {
-			continue
+	// Build filter inverted indexes.
+	if len(cfg.FilterFields) > 0 {
+		idx := &filterIndex{
+			fields: make(map[string]map[any][]int, len(cfg.FilterFields)),
 		}
 		for _, field := range cfg.FilterFields {
-			if val, ok := data[field]; ok {
-				idx.fields[field][val] = append(idx.fields[field][val], i)
+			idx.fields[field] = make(map[any][]int)
+		}
+		for i, data := range c.dataFields {
+			if c.deleted[i] {
+				continue
+			}
+			for _, field := range cfg.FilterFields {
+				if val, ok := data[field]; ok {
+					idx.fields[field][val] = append(idx.fields[field][val], i)
+				}
 			}
 		}
+		c.filterIdx = idx
 	}
 
-	c.filterIdx = idx
+	// Build IVF partitions (ScaNN-style k-means over rotated centroids).
+	// Skip for very small collections where brute-force is faster.
+	if n >= 100 {
+		numPartitions := cfg.NumPartitions
+		if numPartitions <= 0 {
+			numPartitions = int(math.Sqrt(float64(n)))
+			if numPartitions < 4 {
+				numPartitions = 4
+			}
+		}
+		nProbe := cfg.NProbe
+		if nProbe <= 0 {
+			nProbe = int(math.Sqrt(float64(numPartitions)))
+			if nProbe < 1 {
+				nProbe = 1
+			}
+		}
+
+		c.ivfIdx = buildIVF(
+			c.allIndices,
+			c.quantizer.Codebook().Centroids,
+			c.dim,
+			n,
+			numPartitions,
+			nProbe,
+			c.deleted,
+		)
+	}
 }
 
 // filterCandidates returns the set of vector indices matching the filter
@@ -530,10 +560,30 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 
 	allIdx := c.allIndices
 
-	// Try to resolve the filter via the inverted index for O(1) lookup.
+	// Build candidate set from indexes (IVF + filter).
 	var candidates map[int]struct{}
+
+	// IVF partition pruning: only score vectors in nearby partitions.
+	if c.ivfIdx != nil {
+		topPartitions := c.ivfIdx.findNearestPartitions(queryRotated)
+		candidates = c.ivfIdx.candidatesFromPartitions(topPartitions)
+	}
+
+	// Filter index: resolve filter to candidate set.
 	if opts.Filter != nil && c.filterIdx != nil {
-		candidates = c.filterCandidates(opts.Filter)
+		filterCands := c.filterCandidates(opts.Filter)
+		if filterCands != nil {
+			if candidates != nil {
+				// Intersect IVF candidates with filter candidates.
+				for id := range candidates {
+					if _, ok := filterCands[id]; !ok {
+						delete(candidates, id)
+					}
+				}
+			} else {
+				candidates = filterCands
+			}
+		}
 	}
 
 	// Score vectors — either candidate set (indexed) or all vectors (brute-force).

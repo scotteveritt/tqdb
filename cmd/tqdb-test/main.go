@@ -213,6 +213,24 @@ func main() {
 	fmt.Printf("    p95:  %s\n", indexedFilterTimes[len(indexedFilterTimes)*95/100])
 	fmt.Printf("    mean: %s\n", mean(indexedFilterTimes))
 
+	// --- IVF unfiltered search ---
+	fmt.Printf("\n  IVF unfiltered search (top-10, %d queries):\n", numQueries)
+
+	var ivfTimes []time.Duration
+	for _, qi := range queryIndices {
+		query := f32to64(docs[qi].Embedding)
+		start := time.Now()
+		_ = coll.Search(query, 10)
+		ivfTimes = append(ivfTimes, time.Since(start))
+	}
+	sort.Slice(ivfTimes, func(i, j int) bool { return ivfTimes[i] < ivfTimes[j] })
+
+	fmt.Printf("    p50:  %s (was %s brute-force)\n",
+		ivfTimes[len(ivfTimes)/2],
+		unfilteredTimes[len(unfilteredTimes)/2])
+	fmt.Printf("    p95:  %s\n", ivfTimes[len(ivfTimes)*95/100])
+	fmt.Printf("    mean: %s\n", mean(ivfTimes))
+
 	// --- MinScore search ---
 	var minScoreTimes []time.Duration
 	for _, qi := range queryIndices {

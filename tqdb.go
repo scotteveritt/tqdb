@@ -80,9 +80,10 @@ type QueryOptions struct {
 }
 
 // IndexConfig controls index creation (VS2-aligned).
-// FilterFields are fields that get inverted indexes for O(1) filter lookup.
 type IndexConfig struct {
-	FilterFields []string // fields to build inverted indexes on
+	FilterFields  []string // fields to build inverted indexes on
+	NumPartitions int      // IVF partitions (0 = auto √N)
+	NProbe        int      // partitions to search per query (0 = auto √NumPartitions)
 }
 
 // CompressedVector is the output of TurboQuantMSE.Quantize().
