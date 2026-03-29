@@ -22,6 +22,9 @@ func Eq(field string, value any) Filter {
 	return &eqFilter{field: field, value: value}
 }
 
+func (f *eqFilter) Field() string { return f.field }
+func (f *eqFilter) Value() any    { return f.value }
+
 func (f *eqFilter) Match(data map[string]any) bool {
 	if data == nil {
 		return false
@@ -257,6 +260,8 @@ func And(filters ...Filter) Filter {
 	return &andFilter{filters: filters}
 }
 
+func (f *andFilter) Filters() []Filter { return f.filters }
+
 func (f *andFilter) Match(data map[string]any) bool {
 	for _, sub := range f.filters {
 		if !sub.Match(data) {
@@ -274,6 +279,8 @@ type orFilter struct {
 func Or(filters ...Filter) Filter {
 	return &orFilter{filters: filters}
 }
+
+func (f *orFilter) Filters() []Filter { return f.filters }
 
 func (f *orFilter) Match(data map[string]any) bool {
 	for _, sub := range f.filters {

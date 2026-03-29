@@ -33,14 +33,22 @@ type Collection struct {
 	embedFunc tqdb.EmbeddingFunc
 
 	// Contiguous storage for cache-friendly search.
-	// allIndices stores all vectors' indices end-to-end: vec0[0..d-1] | vec1[0..d-1] | ...
 	allIndices []uint8
-	norms      []float32 // original L2 norms (used for dequantization, not search ranking)
+	norms      []float32
 	ids        []string
 	contents   []string
 	dataFields []map[string]any
-	idIndex    map[string]int // O(1) ID lookup
-	deleted    []bool         // tombstone-based delete
+	idIndex    map[string]int
+	deleted    []bool
+
+	// Filter index (built by CreateIndex, nil until then).
+	filterIdx *filterIndex
+}
+
+// filterIndex provides O(1) lookup for Eq/In filter operations.
+// Built by CreateIndex on declared filter fields.
+type filterIndex struct {
+	fields map[string]map[any][]int // field → value → vector indices
 }
 
 // NewCollection creates a new Collection with the given quantizer config.
@@ -96,6 +104,16 @@ func (c *Collection) addCompressed(id, content string, indices []uint8, norm flo
 	c.dataFields = append(c.dataFields, data)
 	c.deleted = append(c.deleted, false)
 	c.idIndex[id] = idx
+
+	// Maintain filter index incrementally.
+	if c.filterIdx != nil && data != nil {
+		for field, fieldIdx := range c.filterIdx.fields {
+			if val, ok := data[field]; ok {
+				fieldIdx[val] = append(fieldIdx[val], idx)
+			}
+		}
+	}
+
 	c.mu.Unlock()
 }
 
@@ -286,6 +304,124 @@ func (c *Collection) Count() int {
 	return len(c.idIndex)
 }
 
+// CreateIndex builds filter indexes on the specified fields.
+// After calling CreateIndex, SearchWithOptions will use inverted index
+// lookups for Eq/In filters instead of scanning all vectors.
+// Matches VS2's CreateIndex API.
+func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	idx := &filterIndex{
+		fields: make(map[string]map[any][]int, len(cfg.FilterFields)),
+	}
+
+	// Initialize each field's inverted index.
+	for _, field := range cfg.FilterFields {
+		idx.fields[field] = make(map[any][]int)
+	}
+
+	// Build the inverted indexes from existing data.
+	for i, data := range c.dataFields {
+		if c.deleted[i] {
+			continue
+		}
+		for _, field := range cfg.FilterFields {
+			if val, ok := data[field]; ok {
+				idx.fields[field][val] = append(idx.fields[field][val], i)
+			}
+		}
+	}
+
+	c.filterIdx = idx
+}
+
+// filterCandidates returns the set of vector indices matching the filter
+// using the inverted index. Returns nil if the filter can't be resolved
+// via the index (falls back to brute-force evaluation).
+func (c *Collection) filterCandidates(f tqdb.Filter) map[int]struct{} {
+	if c.filterIdx == nil {
+		return nil
+	}
+	return resolveFilter(f, c.filterIdx)
+}
+
+// resolveFilter recursively resolves a filter against the inverted index.
+// Returns nil if the filter can't be resolved (requires brute-force).
+func resolveFilter(f tqdb.Filter, idx *filterIndex) map[int]struct{} {
+	switch ft := f.(type) {
+	case interface{ Field() string; Value() any }:
+		// Eq filter — direct lookup
+		field := ft.Field()
+		val := ft.Value()
+		if fieldIdx, ok := idx.fields[field]; ok {
+			if ids, ok := fieldIdx[val]; ok {
+				set := make(map[int]struct{}, len(ids))
+				for _, id := range ids {
+					set[id] = struct{}{}
+				}
+				return set
+			}
+			return map[int]struct{}{} // field indexed but value not found
+		}
+		return nil // field not indexed, fall back
+
+	case interface{ Filters() []tqdb.Filter }:
+		// And/Or — resolve sub-filters
+		subs := ft.Filters()
+		if len(subs) == 0 {
+			return nil
+		}
+
+		// Check if this is And (intersect) or Or (union)
+		// Use Match on empty data to distinguish: And({}) = true, Or({}) = false
+		isAnd := f.Match(map[string]any{})
+
+		if isAnd {
+			// Intersect: start with first resolved set, intersect rest
+			var result map[int]struct{}
+			for _, sub := range subs {
+				resolved := resolveFilter(sub, idx)
+				if resolved == nil {
+					continue // can't resolve this sub, skip it
+				}
+				if result == nil {
+					result = resolved
+				} else {
+					// Intersect
+					for id := range result {
+						if _, ok := resolved[id]; !ok {
+							delete(result, id)
+						}
+					}
+				}
+			}
+			return result
+		}
+
+		// Union
+		result := map[int]struct{}{}
+		allResolved := true
+		for _, sub := range subs {
+			resolved := resolveFilter(sub, idx)
+			if resolved == nil {
+				allResolved = false
+				continue
+			}
+			for id := range resolved {
+				result[id] = struct{}{}
+			}
+		}
+		if !allResolved {
+			return nil // can't fully resolve Or, fall back
+		}
+		return result
+
+	default:
+		return nil // complex filter, fall back to brute-force
+	}
+}
+
 // Search finds the top-k most similar vectors to the query.
 //
 // Scoring uses the inner product in rotated space: <Pi*q_hat, centroids[idx]>
@@ -394,19 +530,27 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 
 	allIdx := c.allIndices
 
-	for i := range n {
-		// Skip deleted entries.
+	// Try to resolve the filter via the inverted index for O(1) lookup.
+	var candidates map[int]struct{}
+	if opts.Filter != nil && c.filterIdx != nil {
+		candidates = c.filterCandidates(opts.Filter)
+	}
+
+	// Score vectors — either candidate set (indexed) or all vectors (brute-force).
+	scoreVec := func(i int) {
 		if c.deleted[i] {
-			continue
+			return
+		}
+		// If we have candidates from the index, skip non-candidates.
+		// If candidates is nil, fall back to brute-force filter evaluation.
+		if candidates != nil {
+			if _, ok := candidates[i]; !ok {
+				return
+			}
+		} else if filterFn != nil && !filterFn(c.dataFields[i]) {
+			return
 		}
 
-		// Apply data field filter before scoring.
-		if filterFn != nil && !filterFn(c.dataFields[i]) {
-			continue
-		}
-
-		// Inner product: <Pi*q_hat, centroids[idx]>
-		// For unit-normalized stored vectors, this ~= cosine similarity.
 		indices := allIdx[i*d : i*d+d : i*d+d]
 
 		var dot float64
@@ -422,14 +566,11 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 			dot += queryRotated[j] * centroids[indices[j]]
 		}
 
-		// Apply MinScore filter after scoring.
 		if opts.MinScore > 0 && dot < opts.MinScore {
-			continue
+			return
 		}
-
-		// Fast rejection.
 		if len(topBuf) >= effectiveK && dot <= minScore {
-			continue
+			return
 		}
 
 		pos := sort.Search(len(topBuf), func(p int) bool {
@@ -444,6 +585,18 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 		}
 		if len(topBuf) == effectiveK {
 			minScore = topBuf[effectiveK-1].score
+		}
+	}
+
+	if candidates != nil {
+		// Indexed path: only score candidate vectors.
+		for i := range candidates {
+			scoreVec(i)
+		}
+	} else {
+		// Brute-force path: score all vectors.
+		for i := range n {
+			scoreVec(i)
 		}
 	}
 
