@@ -73,7 +73,7 @@ func TestStoreCreateFlush(t *testing.T) {
 	rng := rand.New(rand.NewPCG(42, 0))
 	for i := range 100 {
 		vec := randomVector(64, rng)
-		meta := map[string]string{"idx": string(rune('0' + i%10))}
+		meta := map[string]any{"idx": string(rune('0' + i%10))}
 		if err := store.Add(
 			"doc-"+string(rune('A'+i%26)),
 			vec,
@@ -225,20 +225,21 @@ func TestStoreSearchFilter(t *testing.T) {
 		if i%2 == 0 {
 			repo = "repo-b"
 		}
-		_ = s.Add("doc", randomVector(d, rng), map[string]string{"repo": repo})
+		_ = s.Add("doc", randomVector(d, rng), map[string]any{"repo": repo})
 	}
 	_ = s.Close()
 
 	store2, _ := Open(path)
 	defer store2.Close() //nolint:errcheck
 
-	results := store2.SearchWithFilter(randomVector(d, rng), 10, func(meta map[string]string) bool {
-		return meta["repo"] == "repo-b"
+	results := store2.SearchWithOptions(randomVector(d, rng), tqdb.SearchOptions{
+		TopK:   10,
+		Filter: tqdb.Eq("repo", "repo-b"),
 	})
 
 	for _, r := range results {
-		if r.Metadata["repo"] != "repo-b" {
-			t.Errorf("filter failed: got repo=%s", r.Metadata["repo"])
+		if r.Data["repo"] != "repo-b" {
+			t.Errorf("filter failed: got repo=%v", r.Data["repo"])
 		}
 	}
 }
@@ -325,5 +326,101 @@ func TestStoreMatchesCollection(t *testing.T) {
 		if math.Abs(collResults[i].Score-storeResults[i].Score) > 1e-6 {
 			t.Errorf("rank %d: coll=%.6f store=%.6f", i, collResults[i].Score, storeResults[i].Score)
 		}
+	}
+}
+
+func TestStoreSearchWithOptions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "opts.tq")
+
+	rng := rand.New(rand.NewPCG(222, 0))
+	d := 64
+
+	s, _ := Create(path, tqdb.StoreConfig{
+		Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard,
+	})
+
+	for i := range 100 {
+		repo := "repo-a"
+		if i%2 == 0 {
+			repo = "repo-b"
+		}
+		_ = s.Add("doc-"+string(rune('A'+i%26)), randomVector(d, rng), map[string]any{"repo": repo})
+	}
+	_ = s.Close()
+
+	store2, _ := Open(path)
+	defer store2.Close() //nolint:errcheck
+
+	query := randomVector(d, rng)
+
+	// Test Filter.
+	results := store2.SearchWithOptions(query, tqdb.SearchOptions{
+		TopK:   10,
+		Filter: tqdb.Eq("repo", "repo-b"),
+	})
+	for _, r := range results {
+		if r.Data["repo"] != "repo-b" {
+			t.Errorf("filter failed: got repo=%v", r.Data["repo"])
+		}
+	}
+
+	// Test Offset.
+	all := store2.SearchWithOptions(query, tqdb.SearchOptions{TopK: 10})
+	page2 := store2.SearchWithOptions(query, tqdb.SearchOptions{TopK: 5, Offset: 5})
+	if len(all) >= 10 && len(page2) > 0 {
+		if all[5].ID != page2[0].ID {
+			t.Errorf("offset mismatch: all[5]=%s, page2[0]=%s", all[5].ID, page2[0].ID)
+		}
+	}
+
+	// Test MinScore.
+	highMinResults := store2.SearchWithOptions(query, tqdb.SearchOptions{
+		TopK:     50,
+		MinScore: 0.99,
+	})
+	for _, r := range highMinResults {
+		if r.Score < 0.99 {
+			t.Errorf("MinScore filter failed: score=%.4f", r.Score)
+		}
+	}
+}
+
+func TestStoreQuery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "query.tq")
+
+	rng := rand.New(rand.NewPCG(333, 0))
+	d := 64
+
+	s, _ := Create(path, tqdb.StoreConfig{
+		Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard,
+	})
+
+	for i := range 20 {
+		lang := "go"
+		if i%3 == 0 {
+			lang = "python"
+		}
+		_ = s.Add("doc-"+string(rune('A'+i%26)), randomVector(d, rng), map[string]any{"lang": lang})
+	}
+	_ = s.Close()
+
+	store2, _ := Open(path)
+	defer store2.Close() //nolint:errcheck
+
+	results := store2.Query(tqdb.QueryOptions{
+		PageSize: 100,
+		Filter:   tqdb.Eq("lang", "python"),
+	})
+
+	for _, r := range results {
+		if r.Data["lang"] != "python" {
+			t.Errorf("query filter failed: got lang=%v", r.Data["lang"])
+		}
+	}
+	// docs 0, 3, 6, 9, 12, 15, 18 = 7 docs.
+	if len(results) != 7 {
+		t.Errorf("query result count=%d, want 7", len(results))
 	}
 }

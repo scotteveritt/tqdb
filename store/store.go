@@ -83,20 +83,20 @@ func Create(path string, cfg tqdb.StoreConfig) (*Store, error) {
 
 // Add quantizes and buffers a vector for later flushing.
 // Only valid in write mode (created via Create).
-func (s *Store) Add(id string, vec []float64, metadata map[string]string) error {
+func (s *Store) Add(id string, vec []float64, data map[string]any) error {
 	if s.mode != modeWrite {
 		return fmt.Errorf("tqdb: Add called on read-only store")
 	}
 
 	cv := s.quantizer.Quantize(vec)
 
-	// Encode metadata as JSON.
+	// Encode data as JSON.
 	var metaJSON []byte
-	if len(metadata) > 0 {
+	if len(data) > 0 {
 		var err error
-		metaJSON, err = json.Marshal(metadata)
+		metaJSON, err = json.Marshal(data)
 		if err != nil {
-			return fmt.Errorf("tqdb: marshal metadata: %w", err)
+			return fmt.Errorf("tqdb: marshal data: %w", err)
 		}
 	}
 
@@ -109,11 +109,11 @@ func (s *Store) Add(id string, vec []float64, metadata map[string]string) error 
 }
 
 // AddFloat32 is a convenience wrapper for float32 vectors.
-func (s *Store) AddFloat32(id string, vec []float32, metadata map[string]string) error {
-	return s.Add(id, mathutil.Float32ToFloat64(vec), metadata)
+func (s *Store) AddFloat32(id string, vec []float32, data map[string]any) error {
+	return s.Add(id, mathutil.Float32ToFloat64(vec), data)
 }
 
-// Flush writes the store to disk atomically (temp file → rename).
+// Flush writes the store to disk atomically (temp file -> rename).
 // Only valid in write mode.
 func (s *Store) Flush() error {
 	if s.mode != modeWrite {
@@ -247,24 +247,51 @@ func (s *Store) ensureIDsLoaded() {
 	})
 }
 
-func (s *Store) metadataAt(i int) map[string]string {
+func (s *Store) dataAt(i int) map[string]any {
 	if s.metaRaw[i] == nil {
 		return nil
 	}
-	var m map[string]string
+	var m map[string]any
 	_ = json.Unmarshal(s.metaRaw[i], &m)
 	return m
 }
 
 // Search finds the top-k most similar vectors to the query.
 func (s *Store) Search(query []float64, topK int) []tqdb.Result {
-	return s.searchInternal(query, topK, nil)
+	return s.SearchWithOptions(query, tqdb.SearchOptions{TopK: topK})
 }
 
-// SearchWithFilter finds the top-k most similar vectors matching the filter.
-// Note: this eagerly loads all IDs and metadata since the filter accesses them.
-func (s *Store) SearchWithFilter(query []float64, topK int, filter tqdb.Filter) []tqdb.Result {
-	return s.searchInternal(query, topK, filter)
+// SearchWithOptions performs a vector similarity search with VS2-aligned options.
+func (s *Store) SearchWithOptions(query []float64, opts tqdb.SearchOptions) []tqdb.Result {
+	return s.searchInternal(query, opts)
+}
+
+// Query performs filter-only retrieval (no vector similarity scoring).
+func (s *Store) Query(opts tqdb.QueryOptions) []tqdb.Result {
+	if s.mode != modeRead {
+		return nil
+	}
+	if opts.PageSize <= 0 {
+		opts.PageSize = 100
+	}
+
+	s.ensureIDsLoaded()
+
+	var results []tqdb.Result
+	for i := range s.numVecs {
+		data := s.dataAt(i)
+		if opts.Filter != nil && !opts.Filter.Match(data) {
+			continue
+		}
+		results = append(results, tqdb.Result{
+			ID:   s.ids[i],
+			Data: data,
+		})
+		if len(results) >= opts.PageSize {
+			break
+		}
+	}
+	return results
 }
 
 // SearchFloat32 is a convenience wrapper for float32 queries.
@@ -272,9 +299,13 @@ func (s *Store) SearchFloat32(query []float32, topK int) []tqdb.Result {
 	return s.Search(mathutil.Float32ToFloat64(query), topK)
 }
 
-func (s *Store) searchInternal(query []float64, topK int, filter tqdb.Filter) []tqdb.Result {
+func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.Result {
 	if s.mode != modeRead {
 		return nil
+	}
+
+	if opts.TopK <= 0 {
+		opts.TopK = 10
 	}
 
 	n := s.numVecs
@@ -283,14 +314,14 @@ func (s *Store) searchInternal(query []float64, topK int, filter tqdb.Filter) []
 	}
 
 	// If filter is set, we need IDs+metadata for filtering.
-	if filter != nil {
+	if opts.Filter != nil {
 		s.ensureIDsLoaded()
 	}
 
 	d := s.workDim
 	centroids := s.quantizer.Codebook().Centroids
 
-	// Normalize query and rotate — inner product with unit query = cosine similarity.
+	// Normalize query and rotate.
 	queryNorm := mathutil.Norm(query)
 	if queryNorm < 1e-15 {
 		return nil
@@ -305,24 +336,27 @@ func (s *Store) searchInternal(query []float64, topK int, filter tqdb.Filter) []
 	s.quantizer.Rotation().Rotate(queryRotated, unitQuery[:s.quantizer.GetConfig().Dim])
 	s.quantizer.PutBuf(unitQuery)
 
+	effectiveK := opts.TopK + opts.Offset
+
 	type scored struct {
 		idx   int
 		score float64
 	}
-	topBuf := make([]scored, 0, topK+1)
+	topBuf := make([]scored, 0, effectiveK+1)
 	minScore := -math.MaxFloat64
 
 	allIdx := s.allIndices
 
 	for i := range n {
-		if filter != nil {
-			meta := s.metadataAt(i)
-			if !filter(meta) {
+		// Apply data field filter before scoring.
+		if opts.Filter != nil {
+			data := s.dataAt(i)
+			if !opts.Filter.Match(data) {
 				continue
 			}
 		}
 
-		// Inner product: ⟨Π·q̂, centroids[idx]⟩
+		// Inner product: <Pi*q_hat, centroids[idx]>
 		indices := allIdx[i*d : i*d+d : i*d+d]
 
 		var dot float64
@@ -338,7 +372,12 @@ func (s *Store) searchInternal(query []float64, topK int, filter tqdb.Filter) []
 			dot += queryRotated[j] * centroids[indices[j]]
 		}
 
-		if len(topBuf) >= topK && dot <= minScore {
+		// Apply MinScore after scoring.
+		if opts.MinScore > 0 && dot < opts.MinScore {
+			continue
+		}
+
+		if len(topBuf) >= effectiveK && dot <= minScore {
 			continue
 		}
 
@@ -349,15 +388,27 @@ func (s *Store) searchInternal(query []float64, topK int, filter tqdb.Filter) []
 		copy(topBuf[pos+1:], topBuf[pos:])
 		topBuf[pos] = scored{idx: i, score: dot}
 
-		if len(topBuf) > topK {
-			topBuf = topBuf[:topK]
+		if len(topBuf) > effectiveK {
+			topBuf = topBuf[:effectiveK]
 		}
-		if len(topBuf) == topK {
-			minScore = topBuf[topK-1].score
+		if len(topBuf) == effectiveK {
+			minScore = topBuf[effectiveK-1].score
 		}
 	}
 
 	s.quantizer.PutBuf(queryRotated)
+
+	// Apply offset.
+	if opts.Offset > 0 && opts.Offset < len(topBuf) {
+		topBuf = topBuf[opts.Offset:]
+	} else if opts.Offset >= len(topBuf) {
+		topBuf = nil
+	}
+
+	// Trim to TopK.
+	if len(topBuf) > opts.TopK {
+		topBuf = topBuf[:opts.TopK]
+	}
 
 	// Lazy-load IDs for results.
 	s.ensureIDsLoaded()
@@ -365,9 +416,9 @@ func (s *Store) searchInternal(query []float64, topK int, filter tqdb.Filter) []
 	results := make([]tqdb.Result, len(topBuf))
 	for i, sc := range topBuf {
 		results[i] = tqdb.Result{
-			ID:       s.ids[sc.idx],
-			Score:    sc.score,
-			Metadata: s.metadataAt(sc.idx),
+			ID:    s.ids[sc.idx],
+			Score: sc.score,
+			Data:  s.dataAt(sc.idx),
 		}
 	}
 

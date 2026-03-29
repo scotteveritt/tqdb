@@ -59,13 +59,25 @@ func (c Config) WithDefaults() Config {
 
 // Result represents a search result from a Collection or Store.
 type Result struct {
-	ID       string
-	Score    float64 // inner product similarity (≈ cosine sim for unit-normalized vectors)
-	Metadata map[string]string
+	ID      string
+	Score   float64 // inner product similarity (≈ cosine sim for unit-normalized vectors)
+	Content string
+	Data    map[string]any
 }
 
-// Filter is a predicate for filtering entries during search.
-type Filter func(metadata map[string]string) bool
+// SearchOptions controls vector similarity search (VS2: SearchDataObjectsRequest).
+type SearchOptions struct {
+	TopK     int     // max results (default: 10)
+	MinScore float64 // minimum similarity threshold (0 = no filter)
+	Offset   int     // skip first N results (pagination)
+	Filter   Filter  // data field filter
+}
+
+// QueryOptions controls filter-only retrieval (VS2: QueryDataObjectsRequest).
+type QueryOptions struct {
+	PageSize int    // max results (default: 100)
+	Filter   Filter // required
+}
 
 // CompressedVector is the output of TurboQuantMSE.Quantize().
 // It stores quantization indices and the original vector norm.

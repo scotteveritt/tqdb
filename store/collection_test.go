@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"math/rand/v2"
 	"testing"
@@ -102,19 +103,19 @@ func TestCollectionWithFilter(t *testing.T) {
 		if i%2 == 0 {
 			repo = "repo-b"
 		}
-		coll.Add(fmt.Sprintf("doc-%d", i), vec, map[string]string{"repo": repo})
+		coll.Add(fmt.Sprintf("doc-%d", i), vec, map[string]any{"repo": repo})
 	}
 
 	query := randomVector(d, rng)
 
 	// Search with filter for repo-b only
-	results := coll.SearchWithFilter(query, 10, func(meta map[string]string) bool {
-		return meta["repo"] == "repo-b"
+	results := coll.SearchWithFilter(query, 10, func(data map[string]any) bool {
+		return data["repo"] == "repo-b"
 	})
 
 	for _, r := range results {
-		if r.Metadata["repo"] != "repo-b" {
-			t.Errorf("filter failed: got repo=%s", r.Metadata["repo"])
+		if r.Data["repo"] != "repo-b" {
+			t.Errorf("filter failed: got repo=%s", r.Data["repo"])
 		}
 	}
 }
@@ -144,5 +145,401 @@ func TestCollectionAddFloat32(t *testing.T) {
 	results := coll.Search(query, 1)
 	if len(results) != 1 || results[0].ID != "test" {
 		t.Errorf("unexpected search result: %+v", results)
+	}
+}
+
+// --- New CRUD tests ---
+
+func TestCollectionAddDocument(t *testing.T) {
+	coll, err := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rng := rand.New(rand.NewPCG(900, 0))
+	vec := randomVector(64, rng)
+
+	err = coll.AddDocument(context.Background(), tqdb.Document{
+		ID:        "doc-1",
+		Content:   "hello world",
+		Data:      map[string]any{"lang": "go"},
+		Embedding: vec,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if coll.Count() != 1 {
+		t.Errorf("Count=%d, want 1", coll.Count())
+	}
+
+	doc, ok := coll.GetByID("doc-1")
+	if !ok {
+		t.Fatal("GetByID returned false")
+	}
+	if doc.Content != "hello world" {
+		t.Errorf("Content=%q, want %q", doc.Content, "hello world")
+	}
+	if doc.Data["lang"] != "go" {
+		t.Errorf("Data[lang]=%v, want go", doc.Data["lang"])
+	}
+}
+
+func TestCollectionAddDocuments(t *testing.T) {
+	coll, err := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rng := rand.New(rand.NewPCG(901, 0))
+	docs := make([]tqdb.Document, 10)
+	for i := range docs {
+		docs[i] = tqdb.Document{
+			ID:        fmt.Sprintf("doc-%d", i),
+			Content:   fmt.Sprintf("content %d", i),
+			Data:      map[string]any{"idx": float64(i)},
+			Embedding: randomVector(64, rng),
+		}
+	}
+
+	err = coll.AddDocuments(context.Background(), docs, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if coll.Count() != 10 {
+		t.Errorf("Count=%d, want 10", coll.Count())
+	}
+
+	for i := range 10 {
+		doc, ok := coll.GetByID(fmt.Sprintf("doc-%d", i))
+		if !ok {
+			t.Errorf("doc-%d not found", i)
+		}
+		if doc.Content != fmt.Sprintf("content %d", i) {
+			t.Errorf("doc-%d content=%q", i, doc.Content)
+		}
+	}
+}
+
+func TestCollectionGetByID(t *testing.T) {
+	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	rng := rand.New(rand.NewPCG(902, 0))
+
+	coll.Add("a", randomVector(64, rng), map[string]any{"key": "val"})
+
+	doc, ok := coll.GetByID("a")
+	if !ok {
+		t.Fatal("not found")
+	}
+	if doc.ID != "a" {
+		t.Errorf("ID=%q, want a", doc.ID)
+	}
+	if doc.Data["key"] != "val" {
+		t.Errorf("Data[key]=%v, want val", doc.Data["key"])
+	}
+
+	_, ok = coll.GetByID("nonexistent")
+	if ok {
+		t.Error("expected not found for nonexistent ID")
+	}
+}
+
+func TestCollectionDelete(t *testing.T) {
+	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	rng := rand.New(rand.NewPCG(903, 0))
+
+	for i := range 5 {
+		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(64, rng), nil)
+	}
+
+	if coll.Count() != 5 {
+		t.Fatalf("Count=%d, want 5", coll.Count())
+	}
+
+	_ = coll.Delete("doc-2", "doc-4")
+
+	if coll.Count() != 3 {
+		t.Errorf("Count after delete=%d, want 3", coll.Count())
+	}
+
+	_, ok := coll.GetByID("doc-2")
+	if ok {
+		t.Error("deleted doc-2 should not be found")
+	}
+
+	// Deleted entries should not appear in search results.
+	query := randomVector(64, rng)
+	results := coll.Search(query, 10)
+	for _, r := range results {
+		if r.ID == "doc-2" || r.ID == "doc-4" {
+			t.Errorf("deleted ID %q appeared in search results", r.ID)
+		}
+	}
+}
+
+func TestCollectionUpsert(t *testing.T) {
+	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	rng := rand.New(rand.NewPCG(904, 0))
+
+	vec1 := randomVector(64, rng)
+	coll.Upsert("doc-1", vec1, map[string]any{"version": "v1"})
+
+	doc, ok := coll.GetByID("doc-1")
+	if !ok {
+		t.Fatal("not found after upsert")
+	}
+	if doc.Data["version"] != "v1" {
+		t.Errorf("version=%v, want v1", doc.Data["version"])
+	}
+
+	// Upsert same ID with new data.
+	vec2 := randomVector(64, rng)
+	coll.Upsert("doc-1", vec2, map[string]any{"version": "v2"})
+
+	doc, ok = coll.GetByID("doc-1")
+	if !ok {
+		t.Fatal("not found after second upsert")
+	}
+	if doc.Data["version"] != "v2" {
+		t.Errorf("version=%v, want v2", doc.Data["version"])
+	}
+
+	// Should be 1 active entry, not 2.
+	if coll.Count() != 1 {
+		t.Errorf("Count=%d, want 1", coll.Count())
+	}
+}
+
+func TestCollectionUpsertDocument(t *testing.T) {
+	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	rng := rand.New(rand.NewPCG(905, 0))
+
+	err := coll.UpsertDocument(context.Background(), tqdb.Document{
+		ID:        "doc-1",
+		Content:   "first",
+		Embedding: randomVector(64, rng),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = coll.UpsertDocument(context.Background(), tqdb.Document{
+		ID:        "doc-1",
+		Content:   "second",
+		Embedding: randomVector(64, rng),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doc, ok := coll.GetByID("doc-1")
+	if !ok {
+		t.Fatal("not found")
+	}
+	if doc.Content != "second" {
+		t.Errorf("Content=%q, want second", doc.Content)
+	}
+	if coll.Count() != 1 {
+		t.Errorf("Count=%d, want 1", coll.Count())
+	}
+}
+
+func TestCollectionListIDs(t *testing.T) {
+	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	rng := rand.New(rand.NewPCG(906, 0))
+
+	for i := range 5 {
+		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(64, rng), nil)
+	}
+	_ = coll.Delete("doc-2")
+
+	ids := coll.ListIDs()
+	if len(ids) != 4 {
+		t.Errorf("ListIDs len=%d, want 4", len(ids))
+	}
+
+	idSet := make(map[string]bool)
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	if idSet["doc-2"] {
+		t.Error("deleted doc-2 should not be in ListIDs")
+	}
+}
+
+func TestCollectionSearchWithOptions(t *testing.T) {
+	d := 64
+	rng := rand.New(rand.NewPCG(907, 0))
+
+	coll, _ := NewCollection(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
+
+	for i := range 50 {
+		repo := "repo-a"
+		if i%2 == 0 {
+			repo = "repo-b"
+		}
+		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), map[string]any{"repo": repo})
+	}
+
+	query := randomVector(d, rng)
+
+	// Test with Filter.
+	results := coll.SearchWithOptions(query, tqdb.SearchOptions{
+		TopK:   10,
+		Filter: tqdb.Eq("repo", "repo-b"),
+	})
+	for _, r := range results {
+		if r.Data["repo"] != "repo-b" {
+			t.Errorf("filter failed: got repo=%v", r.Data["repo"])
+		}
+	}
+
+	// Test with Offset.
+	all := coll.SearchWithOptions(query, tqdb.SearchOptions{TopK: 10})
+	page2 := coll.SearchWithOptions(query, tqdb.SearchOptions{TopK: 5, Offset: 5})
+	if len(all) >= 10 && len(page2) > 0 {
+		if all[5].ID != page2[0].ID {
+			t.Errorf("offset mismatch: all[5]=%s, page2[0]=%s", all[5].ID, page2[0].ID)
+		}
+	}
+}
+
+func TestCollectionSemanticSearch(t *testing.T) {
+	d := 64
+	rng := rand.New(rand.NewPCG(908, 0))
+
+	// Create a simple embedding function that always returns the same vector.
+	fixedVec := randomVector(d, rng)
+	embedFunc := func(_ context.Context, _ string) ([]float32, error) {
+		f32 := make([]float32, d)
+		for i, v := range fixedVec {
+			f32[i] = float32(v)
+		}
+		return f32, nil
+	}
+
+	coll, err := NewCollectionWithConfig(CollectionConfig{
+		Config:    tqdb.Config{Dim: d, Bits: 4, Seed: 42},
+		EmbedFunc: embedFunc,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Add a document using the embedding function.
+	err = coll.AddDocument(context.Background(), tqdb.Document{
+		ID:      "doc-1",
+		Content: "hello world",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Semantic search.
+	results, err := coll.SemanticSearch(context.Background(), "anything", tqdb.SearchOptions{TopK: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("no results")
+	}
+	if results[0].ID != "doc-1" {
+		t.Errorf("expected doc-1, got %s", results[0].ID)
+	}
+}
+
+func TestCollectionSemanticSearchNoEmbedFunc(t *testing.T) {
+	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
+	_, err := coll.SemanticSearch(context.Background(), "test", tqdb.SearchOptions{TopK: 5})
+	if err == nil {
+		t.Error("expected error when no EmbeddingFunc")
+	}
+}
+
+func TestCollectionQuery(t *testing.T) {
+	d := 64
+	rng := rand.New(rand.NewPCG(909, 0))
+
+	coll, _ := NewCollection(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
+
+	for i := range 20 {
+		lang := "go"
+		if i%3 == 0 {
+			lang = "python"
+		}
+		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), map[string]any{"lang": lang})
+	}
+
+	results := coll.Query(tqdb.QueryOptions{
+		PageSize: 100,
+		Filter:   tqdb.Eq("lang", "python"),
+	})
+
+	for _, r := range results {
+		if r.Data["lang"] != "python" {
+			t.Errorf("query filter failed: got lang=%v", r.Data["lang"])
+		}
+	}
+	// docs 0, 3, 6, 9, 12, 15, 18 = 7 docs.
+	if len(results) != 7 {
+		t.Errorf("query result count=%d, want 7", len(results))
+	}
+}
+
+func TestCollectionMinScore(t *testing.T) {
+	d := 64
+	rng := rand.New(rand.NewPCG(910, 0))
+
+	coll, _ := NewCollection(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
+
+	for i := range 100 {
+		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), nil)
+	}
+
+	query := randomVector(d, rng)
+
+	// With a very high MinScore, should get few/no results.
+	results := coll.SearchWithOptions(query, tqdb.SearchOptions{
+		TopK:     50,
+		MinScore: 0.99,
+	})
+
+	for _, r := range results {
+		if r.Score < 0.99 {
+			t.Errorf("MinScore filter failed: score=%.4f", r.Score)
+		}
+	}
+}
+
+func TestCollectionDeletedExcludedFromSearch(t *testing.T) {
+	d := 64
+	rng := rand.New(rand.NewPCG(911, 0))
+
+	coll, _ := NewCollection(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
+
+	// Add a needle that's very similar to our query.
+	needle := randomVector(d, rng)
+	coll.Add("needle", needle, nil)
+
+	for i := range 50 {
+		coll.Add(fmt.Sprintf("hay-%d", i), randomVector(d, rng), nil)
+	}
+
+	// Verify needle is top-1 before deletion.
+	results := coll.Search(needle, 1)
+	if len(results) > 0 && results[0].ID != "needle" {
+		t.Logf("needle not top-1 before delete (may happen with quantization), got %s", results[0].ID)
+	}
+
+	// Delete the needle.
+	_ = coll.Delete("needle")
+
+	// Needle should not appear in results.
+	results = coll.Search(needle, 10)
+	for _, r := range results {
+		if r.ID == "needle" {
+			t.Error("deleted needle appeared in search results")
+		}
 	}
 }

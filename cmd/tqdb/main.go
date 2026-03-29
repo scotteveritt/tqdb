@@ -147,9 +147,9 @@ func runCreate(args []string) {
 // --- add ---
 
 type jsonlRecord struct {
-	ID       string            `json:"id"`
-	Vector   []float64         `json:"vector"`
-	Metadata map[string]string `json:"metadata,omitempty"`
+	ID       string         `json:"id"`
+	Vector   []float64      `json:"vector"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 func runAdd(args []string) {
@@ -304,11 +304,11 @@ func runSearch(args []string) {
 		_ = enc.Encode(results)
 	default:
 		for i, r := range results {
-			var metaStr strings.Builder
-			for k, v := range r.Metadata {
-				metaStr.WriteString(fmt.Sprintf("  %s=%s", k, v))
+			var dataStr strings.Builder
+			for k, v := range r.Data {
+				dataStr.WriteString(fmt.Sprintf("  %s=%v", k, v))
 			}
-			fmt.Printf("%d. %-20s %.4f%s\n", i+1, r.ID, r.Score, metaStr.String())
+			fmt.Printf("%d. %-20s %.4f%s\n", i+1, r.ID, r.Score, dataStr.String())
 		}
 	}
 }
@@ -503,7 +503,15 @@ func importChromem(outPath, dir string, bits int, rot tqdb.RotationType, seed ui
 			vec[j] = float64(v)
 		}
 
-		if err := s.Add(doc.ID, vec, doc.Metadata); err != nil {
+		// Convert chromem map[string]string to map[string]any.
+		var data map[string]any
+		if len(doc.Metadata) > 0 {
+			data = make(map[string]any, len(doc.Metadata))
+			for k, v := range doc.Metadata {
+				data[k] = v
+			}
+		}
+		if err := s.Add(doc.ID, vec, data); err != nil {
 			skipped++
 			continue
 		}
