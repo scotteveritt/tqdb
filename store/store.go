@@ -247,9 +247,7 @@ func (s *Store) ensureIDsLoaded() {
 	s.idsOnce.Do(func() {
 		s.ids = decodeIDs(s.data[s.header.IDsOff:], s.numVecs)
 		s.dataRaw = decodeDataRaw(s.data[s.header.DataOff:], s.numVecs)
-		if s.header.ContentsOff > 0 && int(s.header.ContentsOff) < len(s.data) {
-			s.contents = decodeContents(s.data[s.header.ContentsOff:], s.numVecs)
-		}
+		s.contents = decodeContents(s.data[s.header.ContentsOff:], s.numVecs)
 	})
 }
 
@@ -421,14 +419,10 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 
 	results := make([]tqdb.Result, len(topBuf))
 	for i, sc := range topBuf {
-		var content string
-		if s.contents != nil && sc.idx < len(s.contents) {
-			content = s.contents[sc.idx]
-		}
 		results[i] = tqdb.Result{
 			ID:      s.ids[sc.idx],
 			Score:   sc.score,
-			Content: content,
+			Content: s.contents[sc.idx],
 			Data:    s.dataAt(sc.idx),
 		}
 	}

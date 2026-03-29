@@ -11,11 +11,11 @@ import (
 // File format constants.
 const (
 	fileMagic      = "TQDB"
-	fileVersion    = uint8(2)
+	fileVersion    = uint8(1)
 	fileHeaderSize = 64
 )
 
-// .tq v2 file layout:
+// .tq file layout:
 //
 //	[Header 64B]
 //	[Indices: N × workDim uint8]
@@ -68,24 +68,21 @@ func decodeHeader(src []byte) (fileHeader, error) {
 	if string(src[0:4]) != fileMagic {
 		return fileHeader{}, fmt.Errorf("tqdb: invalid magic %q (expected %q)", src[0:4], fileMagic)
 	}
-	v := src[4]
-	if v != fileVersion && v != 1 {
-		return fileHeader{}, fmt.Errorf("tqdb: unsupported version %d", v)
+	if src[4] != fileVersion {
+		return fileHeader{}, fmt.Errorf("tqdb: unsupported version %d (expected %d)", src[4], fileVersion)
 	}
 	h := fileHeader{
-		Dim:      binary.LittleEndian.Uint16(src[5:7]),
-		WorkDim:  binary.LittleEndian.Uint16(src[7:9]),
-		Bits:     src[9],
-		Rotation: src[10],
-		UseExact: src[11],
-		Seed:     binary.LittleEndian.Uint64(src[12:20]),
-		NumVecs:  binary.LittleEndian.Uint32(src[20:24]),
-		NormsOff: binary.LittleEndian.Uint32(src[24:28]),
-		IDsOff:   binary.LittleEndian.Uint32(src[28:32]),
-		DataOff:  binary.LittleEndian.Uint32(src[32:36]),
-	}
-	if v >= 2 {
-		h.ContentsOff = binary.LittleEndian.Uint32(src[36:40])
+		Dim:         binary.LittleEndian.Uint16(src[5:7]),
+		WorkDim:     binary.LittleEndian.Uint16(src[7:9]),
+		Bits:        src[9],
+		Rotation:    src[10],
+		UseExact:    src[11],
+		Seed:        binary.LittleEndian.Uint64(src[12:20]),
+		NumVecs:     binary.LittleEndian.Uint32(src[20:24]),
+		NormsOff:    binary.LittleEndian.Uint32(src[24:28]),
+		IDsOff:      binary.LittleEndian.Uint32(src[28:32]),
+		DataOff:     binary.LittleEndian.Uint32(src[32:36]),
+		ContentsOff: binary.LittleEndian.Uint32(src[36:40]),
 	}
 	if h.WorkDim < h.Dim {
 		return fileHeader{}, fmt.Errorf("tqdb: workDim %d < dim %d", h.WorkDim, h.Dim)
@@ -93,7 +90,7 @@ func decodeHeader(src []byte) (fileHeader, error) {
 	return h, nil
 }
 
-// encodeFile serializes the complete .tq v2 file into a byte slice.
+// encodeFile serializes the complete .tq file into a byte slice.
 func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 	numVecs := len(buf.norms)
 	wdim := workDim
