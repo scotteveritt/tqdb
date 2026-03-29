@@ -3,7 +3,6 @@ package kvcache
 import (
 	"fmt"
 	"math"
-	"sort"
 	"sync"
 
 	"github.com/scotteveritt/tqdb"
@@ -15,9 +14,10 @@ import (
 //
 // Features matching the TurboQuant paper and OmarHory's implementation:
 //   - Quantized attention: Q_rot @ centroids[idx]^T without decompressing keys
-//   - Per-channel outlier detection: top-k RMS channels get more bits (Section 4.3)
 //   - Bit-packed indices: 4-bit = 2 per byte, halving memory vs uint8
 //   - Correct attention scores: includes key norms and 1/√d scale
+//
+// Per-channel outlier detection (Section 4.3) is planned but not yet implemented.
 type KVCache struct {
 	layers   int
 	heads    int
@@ -26,28 +26,12 @@ type KVCache struct {
 	packMode bool
 	scale    float64 // 1/√headDim
 
-	// Quantizer for regular channels.
 	quantizer *quantize.TurboQuantMSE
 	workDim   int
-
-	// Outlier handling (nil if disabled).
-	outlier *outlierConfig
 
 	mu     sync.RWMutex
 	keys   [][]kvHead
 	values [][]kvHead
-}
-
-type outlierConfig struct {
-	numOutliers  int    // requested number of outlier channels
-	mask         []bool // length headDim: true = outlier channel
-	regularIdx   []int  // indices of regular channels
-	outlierIdx   []int  // indices of outlier channels
-	regularQuant *quantize.TurboQuantMSE
-	outlierQuant *quantize.TurboQuantMSE
-	regularWork  int
-	outlierWork  int
-	initialized  bool
 }
 
 type kvHead struct {
@@ -66,9 +50,6 @@ func New(cfg tqdb.KVCacheConfig) (*KVCache, error) {
 	}
 	if cfg.Seed == 0 {
 		cfg.Seed = 42
-	}
-	if cfg.OutlierBits == 0 && cfg.NumOutliers > 0 {
-		cfg.OutlierBits = cfg.Bits + 1
 	}
 
 	q, err := quantize.NewMSE(tqdb.Config{
@@ -98,7 +79,7 @@ func New(cfg tqdb.KVCacheConfig) (*KVCache, error) {
 		}
 	}
 
-	kv := &KVCache{
+	return &KVCache{
 		layers:    cfg.Layers,
 		heads:     cfg.Heads,
 		headDim:   cfg.HeadDim,
@@ -109,102 +90,7 @@ func New(cfg tqdb.KVCacheConfig) (*KVCache, error) {
 		workDim:   workDim,
 		keys:      keys,
 		values:    values,
-	}
-
-	// Set up outlier handling if requested.
-	if cfg.NumOutliers > 0 && cfg.NumOutliers < cfg.HeadDim {
-		oq, err := quantize.NewMSE(tqdb.Config{
-			Dim:      cfg.NumOutliers,
-			Bits:     cfg.OutlierBits,
-			Rotation: cfg.Rotation,
-			Seed:     cfg.Seed + 100, // different seed for outlier rotation
-		})
-		if err != nil {
-			return nil, fmt.Errorf("tqdb: create outlier quantizer: %w", err)
-		}
-
-		kv.outlier = &outlierConfig{
-			numOutliers:  cfg.NumOutliers,
-			mask:         make([]bool, cfg.HeadDim),
-			outlierQuant: oq,
-			outlierWork:  oq.Rotation().WorkDim(),
-		}
-		// regularQuant will be created after outlier detection (lazy init)
-	}
-
-	return kv, nil
-}
-
-// DetectOutliers identifies outlier channels from a sample of key vectors.
-// Call this once with a representative batch of keys before appending data.
-// vectors should be [][]float64 with each inner slice of length HeadDim.
-func (kv *KVCache) DetectOutliers(vectors [][]float64) {
-	if kv.outlier == nil || kv.outlier.initialized {
-		return
-	}
-
-	d := kv.headDim
-	numOutliers := kv.outlier.numOutliers
-
-	// Compute per-channel RMS.
-	rms := make([]float64, d)
-	for _, v := range vectors {
-		for j := range d {
-			rms[j] += v[j] * v[j]
-		}
-	}
-	n := float64(len(vectors))
-	for j := range d {
-		rms[j] = math.Sqrt(rms[j] / n)
-	}
-
-	// Find top-k by RMS.
-	type chanRMS struct {
-		idx int
-		val float64
-	}
-	ranked := make([]chanRMS, d)
-	for j := range d {
-		ranked[j] = chanRMS{idx: j, val: rms[j]}
-	}
-	sort.Slice(ranked, func(i, j int) bool {
-		return ranked[i].val > ranked[j].val
-	})
-
-	// Count how many outliers were requested.
-	actualOutliers := min(numOutliers, d)
-
-	// Mark outlier channels.
-	kv.outlier.mask = make([]bool, d)
-	for i := range actualOutliers {
-		kv.outlier.mask[ranked[i].idx] = true
-	}
-
-	// Build index lists.
-	kv.outlier.outlierIdx = nil
-	kv.outlier.regularIdx = nil
-	for j := range d {
-		if kv.outlier.mask[j] {
-			kv.outlier.outlierIdx = append(kv.outlier.outlierIdx, j)
-		} else {
-			kv.outlier.regularIdx = append(kv.outlier.regularIdx, j)
-		}
-	}
-
-	// Create regular quantizer for the non-outlier channels.
-	regularDim := len(kv.outlier.regularIdx)
-	rq, err := quantize.NewMSE(tqdb.Config{
-		Dim:      regularDim,
-		Bits:     kv.bits,
-		Rotation: kv.quantizer.GetConfig().Rotation,
-		Seed:     kv.quantizer.GetConfig().Seed,
-	})
-	if err == nil {
-		kv.outlier.regularQuant = rq
-		kv.outlier.regularWork = rq.Rotation().WorkDim()
-	}
-
-	kv.outlier.initialized = true
+	}, nil
 }
 
 // AppendKey quantizes and stores a key vector.
@@ -341,19 +227,6 @@ func (kv *KVCache) SeqLen(layer, head int) int {
 	kv.mu.RLock()
 	defer kv.mu.RUnlock()
 	return kv.keys[layer][head].seqLen
-}
-
-// EffectiveBitsPerElement returns the average bits per element,
-// accounting for outlier channels if configured.
-func (kv *KVCache) EffectiveBitsPerElement() float64 {
-	if kv.outlier == nil || !kv.outlier.initialized {
-		return float64(kv.bits)
-	}
-	nReg := float64(len(kv.outlier.regularIdx))
-	nOut := float64(len(kv.outlier.outlierIdx))
-	regBits := float64(kv.bits)
-	outBits := float64(kv.outlier.outlierQuant.GetConfig().Bits)
-	return (nReg*regBits + nOut*outBits) / (nReg + nOut)
 }
 
 // MemoryUsage returns the approximate memory in bytes used by the cache.

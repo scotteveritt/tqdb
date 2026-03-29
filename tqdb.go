@@ -218,9 +218,7 @@ type KVCacheConfig struct {
 	Layers      int          // number of transformer layers
 	Heads       int          // number of attention heads
 	HeadDim     int          // dimension per head (typically 64 or 128)
-	Bits        int          // quantization bits for regular channels (default: 4)
-	OutlierBits int          // bits for outlier channels (default: Bits+1, 0=no outliers)
-	NumOutliers int          // number of outlier channels to detect (default: 0=disabled)
+	Bits        int          // quantization bits per coordinate (default: 4)
 	PackIndices bool         // bit-pack indices in storage (default: false)
 	Rotation    RotationType // rotation algorithm (default: RotationHadamard)
 	Seed        uint64       // rotation seed (default: 42)

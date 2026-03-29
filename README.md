@@ -46,37 +46,49 @@ tqdb convert ./model-dir -o model.gguf
 ## Library — Vector Store
 
 ```go
-import "github.com/scotteveritt/tqdb"
+import (
+    "github.com/scotteveritt/tqdb"
+    "github.com/scotteveritt/tqdb/store"
+)
 
 // Write
-store, _ := tqdb.CreateStore("index.tq", tqdb.StoreConfig{
+s, _ := store.Create("index.tq", tqdb.StoreConfig{
     Dim:      768,
     Bits:     4,
     Rotation: tqdb.RotationHadamard,
 })
-store.Add("doc-1", embedding, map[string]string{"repo": "myrepo"})
-store.Close() // atomic flush to disk
+s.Add("doc-1", embedding, map[string]any{"repo": "myrepo"})
+s.Close() // atomic flush to disk
 
 // Read (mmap, instant open)
-store, _ = tqdb.OpenStore("index.tq")
-defer store.Close()
+s, _ = store.Open("index.tq")
+defer s.Close()
 
-results := store.Search(query, 10)
+results := s.Search(query, 10)
 for _, r := range results {
     fmt.Printf("%s: %.4f\n", r.ID, r.Score)
 }
+
+// Filtered search (VS2-aligned)
+results = s.SearchWithOptions(query, tqdb.SearchOptions{
+    TopK:   10,
+    Filter: tqdb.And(tqdb.Eq("repo", "tqdb"), tqdb.Gt("stars", 50.0)),
+})
 ```
 
 ## Library — KV Cache
 
 ```go
-kv, _ := tqdb.NewKVCache(tqdb.KVCacheConfig{
+import (
+    "github.com/scotteveritt/tqdb"
+    "github.com/scotteveritt/tqdb/kvcache"
+)
+
+kv, _ := kvcache.New(tqdb.KVCacheConfig{
     Layers:      32,
     Heads:       32,
     HeadDim:     128,
     Bits:        4,
-    NumOutliers: 16,       // top-k channels get more bits
-    OutlierBits: 6,
     PackIndices: true,      // 2 indices per byte
     Rotation:    tqdb.RotationHadamard,
 })
@@ -91,7 +103,12 @@ value := kv.GetValue(layer, head, pos)              // decompress on demand
 ## Library — Standalone Quantizer
 
 ```go
-q, _ := tqdb.NewMSE(tqdb.Config{Dim: 768, Bits: 4, Rotation: tqdb.RotationHadamard})
+import (
+    "github.com/scotteveritt/tqdb"
+    "github.com/scotteveritt/tqdb/quantize"
+)
+
+q, _ := quantize.NewMSE(tqdb.Config{Dim: 768, Bits: 4, Rotation: tqdb.RotationHadamard})
 
 cv := q.Quantize(embedding)                         // compress
 recon := q.Dequantize(cv)                           // decompress
@@ -178,8 +195,6 @@ Based on [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026):
 1. **Rotate** — Randomized Walsh-Hadamard Transform spreads outlier energy uniformly
 2. **Quantize** — Per-coordinate Lloyd-Max with a precomputed codebook (no training data)
 3. **Search** — Pre-rotate query once, then inner product via centroid lookup (no decompression)
-
-Optional: per-channel outlier detection gives high-variance channels more bits ([Section 4.3](https://arxiv.org/abs/2504.19874)).
 
 ## License
 

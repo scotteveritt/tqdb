@@ -295,13 +295,6 @@ func (c *Collection) Search(query []float64, topK int) []tqdb.Result {
 	return c.SearchWithOptions(query, tqdb.SearchOptions{TopK: topK})
 }
 
-// SearchWithFilter finds the top-k most similar vectors matching the filter.
-//
-// Deprecated: Use SearchWithOptions instead.
-func (c *Collection) SearchWithFilter(query []float64, topK int, filter func(data map[string]any) bool) []tqdb.Result {
-	return c.searchInternal(query, topK, filter, tqdb.SearchOptions{TopK: topK})
-}
-
 // SearchWithOptions performs a vector similarity search with VS2-aligned options.
 func (c *Collection) SearchWithOptions(query []float64, opts tqdb.SearchOptions) []tqdb.Result {
 	if opts.TopK <= 0 {

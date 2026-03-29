@@ -109,8 +109,9 @@ func TestCollectionWithFilter(t *testing.T) {
 	query := randomVector(d, rng)
 
 	// Search with filter for repo-b only
-	results := coll.SearchWithFilter(query, 10, func(data map[string]any) bool {
-		return data["repo"] == "repo-b"
+	results := coll.SearchWithOptions(query, tqdb.SearchOptions{
+		TopK:   10,
+		Filter: tqdb.Eq("repo", "repo-b"),
 	})
 
 	for _, r := range results {

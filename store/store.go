@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -48,6 +49,10 @@ type Store struct {
 	ids      []string
 	dataRaw  [][]byte // raw JSON blobs
 	contents []string // document content
+
+	// Parsed data cache for filter-heavy searches (avoids repeated json.Unmarshal).
+	dataCacheOnce sync.Once
+	dataCache     []map[string]any
 }
 
 // writeBuffer accumulates vectors before flushing to disk.
@@ -114,6 +119,39 @@ func (s *Store) Add(id string, vec []float64, data map[string]any) error {
 // AddFloat32 is a convenience wrapper for float32 vectors.
 func (s *Store) AddFloat32(id string, vec []float32, data map[string]any) error {
 	return s.Add(id, mathutil.Float32ToFloat64(vec), data)
+}
+
+// AddDocument quantizes and buffers a Document for later flushing.
+// Only valid in write mode (created via Create).
+// The document must have a non-nil Embedding; Store does not support auto-embedding.
+func (s *Store) AddDocument(_ context.Context, doc tqdb.Document) error {
+	if s.mode != modeWrite {
+		return fmt.Errorf("tqdb: AddDocument called on read-only store")
+	}
+
+	vec := doc.Embedding
+	if len(vec) == 0 {
+		return fmt.Errorf("tqdb: Document.Embedding is required for Store (no EmbedFunc)")
+	}
+
+	cv := s.quantizer.Quantize(vec)
+
+	var dataJSON []byte
+	if len(doc.Data) > 0 {
+		var err error
+		dataJSON, err = json.Marshal(doc.Data)
+		if err != nil {
+			return fmt.Errorf("tqdb: marshal data: %w", err)
+		}
+	}
+
+	s.buf.allIndices = append(s.buf.allIndices, cv.Indices...)
+	s.buf.norms = append(s.buf.norms, cv.Norm)
+	s.buf.ids = append(s.buf.ids, doc.ID)
+	s.buf.data = append(s.buf.data, dataJSON)
+	s.buf.contents = append(s.buf.contents, doc.Content)
+
+	return nil
 }
 
 // Flush writes the store to disk atomically (temp file -> rename).
@@ -251,6 +289,21 @@ func (s *Store) ensureIDsLoaded() {
 	})
 }
 
+// ensureDataCached parses all JSON data blobs once for efficient filtered searches.
+func (s *Store) ensureDataCached() {
+	s.dataCacheOnce.Do(func() {
+		s.ensureIDsLoaded()
+		s.dataCache = make([]map[string]any, s.numVecs)
+		for i, raw := range s.dataRaw {
+			if raw != nil {
+				var m map[string]any
+				_ = json.Unmarshal(raw, &m)
+				s.dataCache[i] = m
+			}
+		}
+	})
+}
+
 func (s *Store) dataAt(i int) map[string]any {
 	if s.dataRaw[i] == nil {
 		return nil
@@ -279,17 +332,16 @@ func (s *Store) Query(opts tqdb.QueryOptions) []tqdb.Result {
 		opts.PageSize = 100
 	}
 
-	s.ensureIDsLoaded()
+	s.ensureDataCached()
 
 	var results []tqdb.Result
 	for i := range s.numVecs {
-		data := s.dataAt(i)
-		if opts.Filter != nil && !opts.Filter.Match(data) {
+		if opts.Filter != nil && !opts.Filter.Match(s.dataCache[i]) {
 			continue
 		}
 		results = append(results, tqdb.Result{
 			ID:   s.ids[i],
-			Data: data,
+			Data: s.dataCache[i],
 		})
 		if len(results) >= opts.PageSize {
 			break
@@ -317,9 +369,9 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 		return nil
 	}
 
-	// If filter is set, we need IDs+metadata for filtering.
+	// If filter is set, parse all data blobs once up front.
 	if opts.Filter != nil {
-		s.ensureIDsLoaded()
+		s.ensureDataCached()
 	}
 
 	d := s.workDim
@@ -354,8 +406,7 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 	for i := range n {
 		// Apply data field filter before scoring.
 		if opts.Filter != nil {
-			data := s.dataAt(i)
-			if !opts.Filter.Match(data) {
+			if !opts.Filter.Match(s.dataCache[i]) {
 				continue
 			}
 		}

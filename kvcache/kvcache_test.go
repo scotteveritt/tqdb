@@ -240,51 +240,6 @@ func TestKVCachePackedGetValue(t *testing.T) {
 	}
 }
 
-// --- Outlier detection tests ---
-
-func TestKVCacheOutlierDetection(t *testing.T) {
-	kv, err := New(tqdb.KVCacheConfig{
-		Layers: 1, Heads: 1, HeadDim: 64, Bits: 3,
-		OutlierBits: 5, NumOutliers: 8,
-		Rotation: tqdb.RotationHadamard,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Create calibration data with known outlier channels.
-	// Channels 0-7 have 10x the magnitude of others.
-	rng := rand.New(rand.NewPCG(42, 0))
-	var calibration [][]float64
-	for range 100 {
-		v := randomVector(64, rng)
-		for j := range 8 {
-			v[j] *= 10.0 // channels 0-7 are outliers
-		}
-		calibration = append(calibration, v)
-	}
-
-	kv.DetectOutliers(calibration)
-
-	if kv.outlier == nil || !kv.outlier.initialized {
-		t.Fatal("outlier detection not initialized")
-	}
-
-	// Verify channels 0-7 are detected as outliers.
-	for j := range 8 {
-		if !kv.outlier.mask[j] {
-			t.Errorf("channel %d should be outlier but isn't", j)
-		}
-	}
-	for j := 8; j < 64; j++ {
-		if kv.outlier.mask[j] {
-			t.Errorf("channel %d should NOT be outlier but is", j)
-		}
-	}
-
-	t.Logf("Effective bits: %.2f", kv.EffectiveBitsPerElement())
-}
-
 func BenchmarkKVCacheAppendKey(b *testing.B) {
 	kv, _ := New(tqdb.KVCacheConfig{
 		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4, Rotation: tqdb.RotationHadamard,
