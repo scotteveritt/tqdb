@@ -1,6 +1,6 @@
-# Binaries
-tqdb
-tqdb-bench
+# Binaries (root only, not cmd/ source dirs)
+/tqdb
+/tqdb-bench
 *.exe
 
 # Test artifacts
