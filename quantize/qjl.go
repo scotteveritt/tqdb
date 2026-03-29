@@ -83,6 +83,42 @@ func (q *QJL) SketchTo(dst []int8, x []float64) {
 	}
 }
 
+// ProjectQuery pre-computes S·query for batch inner product computation.
+// Call this once per query, then use InnerProductProjected for each vector.
+func (q *QJL) ProjectQuery(query []float64) []float64 {
+	d := q.d
+	m := q.m
+	data := q.data
+	projected := make([]float64, m)
+
+	for i := range m {
+		row := data[i*d : i*d+d : i*d+d]
+		var s0, s1, s2, s3 float64
+		j := 0
+		for ; j <= d-4; j += 4 {
+			s0 += row[j] * query[j]
+			s1 += row[j+1] * query[j+1]
+			s2 += row[j+2] * query[j+2]
+			s3 += row[j+3] * query[j+3]
+		}
+		for ; j < d; j++ {
+			s0 += row[j] * query[j]
+		}
+		projected[i] = s0 + s1 + s2 + s3
+	}
+	return projected
+}
+
+// InnerProductProjected computes the unbiased estimator using a pre-projected query.
+// sqProjected is the output of ProjectQuery(query).
+func (q *QJL) InnerProductProjected(queryDotMSE float64, sqProjected []float64, signs []int8, residualNorm float64) float64 {
+	var sqDot float64
+	for i, s := range signs {
+		sqDot += sqProjected[i] * float64(s)
+	}
+	return queryDotMSE + residualNorm*q.scale*sqDot
+}
+
 // InnerProduct computes the unbiased inner product estimator:
 //
 //	⟨q, x⟩ ≈ ⟨q, x_mse⟩ + γ · √(π/2)/m · ⟨S·q, signs⟩
@@ -223,9 +259,27 @@ func (tq *TurboQuantProd) Dequantize(cv *tqdb.CompressedProdVector) []float64 {
 // InnerProduct computes an unbiased estimate of ⟨query, vec⟩
 // without fully decompressing the vector.
 func (tq *TurboQuantProd) InnerProduct(query []float64, cv *tqdb.CompressedProdVector) float64 {
+	d := tq.config.Dim
 	buf := tq.mse.GetBuf()
 	tq.mse.DequantizeTo(buf, &cv.CompressedVector)
-	ip := tq.qjl.InnerProduct(query, buf, cv.Signs, float64(cv.ResidualNorm))
+	ip := tq.qjl.InnerProduct(query, buf[:d], cv.Signs, float64(cv.ResidualNorm))
 	tq.mse.PutBuf(buf)
 	return ip
+}
+
+// ProjectQuery pre-computes the QJL projection of the query for batch scoring.
+// Returns the projected query vector. Use with InnerProductProjected.
+func (tq *TurboQuantProd) ProjectQuery(query []float64) []float64 {
+	return tq.qjl.ProjectQuery(query)
+}
+
+// InnerProductProjected computes the unbiased inner product using a pre-projected query.
+// This is O(d) per vector instead of O(d²) — use for batch search.
+func (tq *TurboQuantProd) InnerProductProjected(query []float64, sqProjected []float64, cv *tqdb.CompressedProdVector) float64 {
+	d := tq.config.Dim
+	buf := tq.mse.GetBuf()
+	tq.mse.DequantizeTo(buf, &cv.CompressedVector)
+	queryDotMSE := mathutil.Dot(query, buf[:d])
+	tq.mse.PutBuf(buf)
+	return tq.qjl.InnerProductProjected(queryDotMSE, sqProjected, cv.Signs, float64(cv.ResidualNorm))
 }
