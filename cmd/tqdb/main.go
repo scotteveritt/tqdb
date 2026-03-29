@@ -309,7 +309,7 @@ func runSearch(args []string) {
 		for i, r := range results {
 			var dataStr strings.Builder
 			for k, v := range r.Data {
-				dataStr.WriteString(fmt.Sprintf("  %s=%v", k, v))
+				fmt.Fprintf(&dataStr, "  %s=%v", k, v)
 			}
 			fmt.Printf("%d. %-20s %.4f%s\n", i+1, r.ID, r.Score, dataStr.String())
 		}
