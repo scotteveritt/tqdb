@@ -1,4 +1,4 @@
-package tqdb
+package store
 
 import (
 	"encoding/json"
@@ -8,51 +8,10 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/scotteveritt/tqdb"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
+	"github.com/scotteveritt/tqdb/quantize"
 )
-
-// StoreConfig controls store creation.
-type StoreConfig struct {
-	Dim         int          // embedding dimension (required)
-	Bits        int          // bits per coordinate: 1-8 (default: 4)
-	Rotation    RotationType // rotation algorithm (default: RotationQR)
-	Seed        uint64       // rotation matrix seed (default: 42)
-	UseExactPDF bool         // use exact Beta PDF for codebook
-}
-
-func (c StoreConfig) toConfig() Config {
-	return Config{
-		Dim:         c.Dim,
-		Bits:        c.Bits,
-		Rotation:    c.Rotation,
-		Seed:        c.Seed,
-		UseExactPDF: c.UseExactPDF,
-	}
-}
-
-func (c StoreConfig) withDefaults() StoreConfig {
-	if c.Bits == 0 {
-		c.Bits = 4
-	}
-	if c.Seed == 0 {
-		c.Seed = 42
-	}
-	return c
-}
-
-// StoreInfo contains statistics about a store.
-type StoreInfo struct {
-	Path        string
-	Dim         int
-	WorkDim     int
-	Bits        int
-	Rotation    RotationType
-	Seed        uint64
-	NumVecs     int
-	FileSize    int64
-	IndexBytes  int64
-	Compression float64 // ratio vs float32
-}
 
 type storeMode int
 
@@ -63,13 +22,13 @@ const (
 
 // Store is a quantized vector store backed by a .tq file.
 //
-// A Store is either in write mode (created via CreateStore) or
-// read mode (opened via OpenStore). Write-mode stores support Add/Flush.
+// A Store is either in write mode (created via Create) or
+// read mode (opened via Open). Write-mode stores support Add/Flush.
 // Read-mode stores support Search. Concurrent Search calls are safe.
 type Store struct {
 	path      string
-	config    StoreConfig
-	quantizer *TurboQuantMSE
+	config    tqdb.StoreConfig
+	quantizer *quantize.TurboQuantMSE
 	mode      storeMode
 	workDim   int
 
@@ -79,10 +38,10 @@ type Store struct {
 	// Read mode: mmap'd or loaded file data.
 	data       []byte       // full file data (mmap or read)
 	release    func() error // cleanup (Unmap or no-op)
-	allIndices []byte        // slice into data (indices section, zero-copy)
+	allIndices []byte       // slice into data (indices section, zero-copy)
 	norms      []float32    // original L2 norms (for dequantization, not search)
 	numVecs    int
-	header     fileHeader   // cached for lazy loading
+	header     fileHeader // cached for lazy loading
 
 	// Lazy-loaded via sync.Once on first Search result access.
 	idsOnce sync.Once
@@ -98,16 +57,16 @@ type writeBuffer struct {
 	metadata   [][]byte // raw JSON bytes per vector
 }
 
-// CreateStore creates a new store for writing. Call Add() to insert vectors,
+// Create creates a new store for writing. Call Add() to insert vectors,
 // then Flush() to write the .tq file atomically.
-func CreateStore(path string, cfg StoreConfig) (*Store, error) {
-	cfg = cfg.withDefaults()
-	qcfg := cfg.toConfig()
-	if err := qcfg.validate(); err != nil {
+func Create(path string, cfg tqdb.StoreConfig) (*Store, error) {
+	cfg = cfg.WithDefaults()
+	qcfg := cfg.ToConfig()
+	if err := qcfg.Validate(); err != nil {
 		return nil, err
 	}
 
-	q, err := NewMSE(qcfg)
+	q, err := quantize.NewMSE(qcfg)
 	if err != nil {
 		return nil, fmt.Errorf("tqdb: create quantizer: %w", err)
 	}
@@ -117,13 +76,13 @@ func CreateStore(path string, cfg StoreConfig) (*Store, error) {
 		config:    cfg,
 		quantizer: q,
 		mode:      modeWrite,
-		workDim:   q.rotation.WorkDim(),
+		workDim:   q.Rotation().WorkDim(),
 		buf:       &writeBuffer{},
 	}, nil
 }
 
 // Add quantizes and buffers a vector for later flushing.
-// Only valid in write mode (created via CreateStore).
+// Only valid in write mode (created via Create).
 func (s *Store) Add(id string, vec []float64, metadata map[string]string) error {
 	if s.mode != modeWrite {
 		return fmt.Errorf("tqdb: Add called on read-only store")
@@ -205,10 +164,10 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// OpenStore opens a .tq file for reading. The indices section is
+// Open opens a .tq file for reading. The indices section is
 // memory-mapped for zero-copy search. Falls back to bulk read
 // if mmap is unavailable.
-func OpenStore(path string) (*Store, error) {
+func Open(path string) (*Store, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("tqdb: open: %w", err)
@@ -245,14 +204,14 @@ func OpenStore(path string) (*Store, error) {
 	}
 
 	// Reconstruct quantizer from header config.
-	cfg := StoreConfig{
+	cfg := tqdb.StoreConfig{
 		Dim:         int(hdr.Dim),
 		Bits:        int(hdr.Bits),
-		Rotation:    RotationType(hdr.Rotation),
+		Rotation:    tqdb.RotationType(hdr.Rotation),
 		Seed:        hdr.Seed,
 		UseExactPDF: hdr.UseExact != 0,
 	}
-	q, err := NewMSE(cfg.toConfig())
+	q, err := quantize.NewMSE(cfg.ToConfig())
 	if err != nil {
 		_ = release()
 		return nil, fmt.Errorf("tqdb: reconstruct quantizer: %w", err)
@@ -298,22 +257,22 @@ func (s *Store) metadataAt(i int) map[string]string {
 }
 
 // Search finds the top-k most similar vectors to the query.
-func (s *Store) Search(query []float64, topK int) []Result {
+func (s *Store) Search(query []float64, topK int) []tqdb.Result {
 	return s.searchInternal(query, topK, nil)
 }
 
 // SearchWithFilter finds the top-k most similar vectors matching the filter.
 // Note: this eagerly loads all IDs and metadata since the filter accesses them.
-func (s *Store) SearchWithFilter(query []float64, topK int, filter Filter) []Result {
+func (s *Store) SearchWithFilter(query []float64, topK int, filter tqdb.Filter) []tqdb.Result {
 	return s.searchInternal(query, topK, filter)
 }
 
 // SearchFloat32 is a convenience wrapper for float32 queries.
-func (s *Store) SearchFloat32(query []float32, topK int) []Result {
+func (s *Store) SearchFloat32(query []float32, topK int) []tqdb.Result {
 	return s.Search(mathutil.Float32ToFloat64(query), topK)
 }
 
-func (s *Store) searchInternal(query []float64, topK int, filter Filter) []Result {
+func (s *Store) searchInternal(query []float64, topK int, filter tqdb.Filter) []tqdb.Result {
 	if s.mode != modeRead {
 		return nil
 	}
@@ -329,7 +288,7 @@ func (s *Store) searchInternal(query []float64, topK int, filter Filter) []Resul
 	}
 
 	d := s.workDim
-	centroids := s.quantizer.codebook.Centroids
+	centroids := s.quantizer.Codebook().Centroids
 
 	// Normalize query and rotate — inner product with unit query = cosine similarity.
 	queryNorm := mathutil.Norm(query)
@@ -338,13 +297,13 @@ func (s *Store) searchInternal(query []float64, topK int, filter Filter) []Resul
 	}
 	invQN := 1.0 / queryNorm
 
-	unitQuery := s.quantizer.getBuf()
+	unitQuery := s.quantizer.GetBuf()
 	for i, v := range query {
 		unitQuery[i] = v * invQN
 	}
-	queryRotated := s.quantizer.getBuf()
-	s.quantizer.rotation.Rotate(queryRotated, unitQuery[:s.quantizer.config.Dim])
-	s.quantizer.putBuf(unitQuery)
+	queryRotated := s.quantizer.GetBuf()
+	s.quantizer.Rotation().Rotate(queryRotated, unitQuery[:s.quantizer.GetConfig().Dim])
+	s.quantizer.PutBuf(unitQuery)
 
 	type scored struct {
 		idx   int
@@ -398,14 +357,14 @@ func (s *Store) searchInternal(query []float64, topK int, filter Filter) []Resul
 		}
 	}
 
-	s.quantizer.putBuf(queryRotated)
+	s.quantizer.PutBuf(queryRotated)
 
 	// Lazy-load IDs for results.
 	s.ensureIDsLoaded()
 
-	results := make([]Result, len(topBuf))
+	results := make([]tqdb.Result, len(topBuf))
 	for i, sc := range topBuf {
-		results[i] = Result{
+		results[i] = tqdb.Result{
 			ID:       s.ids[sc.idx],
 			Score:    sc.score,
 			Metadata: s.metadataAt(sc.idx),
@@ -416,7 +375,7 @@ func (s *Store) searchInternal(query []float64, topK int, filter Filter) []Resul
 }
 
 // Info returns statistics about the store.
-func (s *Store) Info() StoreInfo {
+func (s *Store) Info() tqdb.StoreInfo {
 	var fileSize int64
 	if s.mode == modeRead {
 		fileSize = int64(len(s.data))
@@ -432,7 +391,7 @@ func (s *Store) Info() StoreInfo {
 		compression = float64(float32Size) / float64(fileSize)
 	}
 
-	return StoreInfo{
+	return tqdb.StoreInfo{
 		Path:        s.path,
 		Dim:         s.config.Dim,
 		WorkDim:     s.workDim,

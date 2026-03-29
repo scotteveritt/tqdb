@@ -1,10 +1,11 @@
-package tqdb
+package store
 
 import (
 	"fmt"
 	"math/rand/v2"
 	"testing"
 
+	"github.com/scotteveritt/tqdb"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
 )
 
@@ -24,7 +25,7 @@ func TestCollectionNeedleInHaystack(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(uint64(tc.d*1000+tc.bits), 0))
 
-			coll, err := NewCollection(Config{Dim: tc.d, Bits: tc.bits, Seed: 42})
+			coll, err := NewCollection(tqdb.Config{Dim: tc.d, Bits: tc.bits, Seed: 42})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -62,7 +63,7 @@ func TestCollectionSearchQuality(t *testing.T) {
 	n := 100
 	rng := rand.New(rand.NewPCG(600, 0))
 
-	coll, err := NewCollection(Config{Dim: d, Bits: bits, Seed: 42})
+	coll, err := NewCollection(tqdb.Config{Dim: d, Bits: bits, Seed: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func TestCollectionWithFilter(t *testing.T) {
 	d := 64
 	rng := rand.New(rand.NewPCG(700, 0))
 
-	coll, err := NewCollection(Config{Dim: d, Bits: 4, Seed: 42})
+	coll, err := NewCollection(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestCollectionWithFilter(t *testing.T) {
 }
 
 func TestCollectionLen(t *testing.T) {
-	coll, _ := NewCollection(Config{Dim: 64, Bits: 4, Seed: 42})
+	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
 	if coll.Len() != 0 {
 		t.Errorf("empty collection Len=%d", coll.Len())
 	}
@@ -134,7 +135,7 @@ func TestCollectionLen(t *testing.T) {
 }
 
 func TestCollectionAddFloat32(t *testing.T) {
-	coll, _ := NewCollection(Config{Dim: 4, Bits: 4, Seed: 42})
+	coll, _ := NewCollection(tqdb.Config{Dim: 4, Bits: 4, Seed: 42})
 
 	vec32 := []float32{1.0, 2.0, 3.0, 4.0}
 	coll.AddFloat32("test", vec32, nil)

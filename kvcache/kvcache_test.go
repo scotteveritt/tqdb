@@ -1,18 +1,28 @@
-package tqdb
+package kvcache
 
 import (
 	"math"
 	"math/rand/v2"
 	"testing"
+
+	"github.com/scotteveritt/tqdb"
 )
 
+func randomVector(d int, rng *rand.Rand) []float64 {
+	v := make([]float64, d)
+	for i := range v {
+		v[i] = rng.NormFloat64()
+	}
+	return v
+}
+
 func TestKVCacheBasic(t *testing.T) {
-	kv, err := NewKVCache(KVCacheConfig{
-		Layers:  2,
-		Heads:   4,
-		HeadDim: 64,
-		Bits:    4,
-		Rotation: RotationHadamard,
+	kv, err := New(tqdb.KVCacheConfig{
+		Layers:   2,
+		Heads:    4,
+		HeadDim:  64,
+		Bits:     4,
+		Rotation: tqdb.RotationHadamard,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -33,8 +43,8 @@ func TestKVCacheBasic(t *testing.T) {
 }
 
 func TestKVCacheNeedleInHaystack(t *testing.T) {
-	kv, _ := NewKVCache(KVCacheConfig{
-		Layers: 1, Heads: 1, HeadDim: 64, Bits: 4, Rotation: RotationHadamard,
+	kv, _ := New(tqdb.KVCacheConfig{
+		Layers: 1, Heads: 1, HeadDim: 64, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 
 	rng := rand.New(rand.NewPCG(99, 0))
@@ -74,8 +84,8 @@ func TestKVCacheNeedleInHaystack(t *testing.T) {
 }
 
 func TestKVCacheGetValue(t *testing.T) {
-	kv, _ := NewKVCache(KVCacheConfig{
-		Layers: 1, Heads: 1, HeadDim: 64, Bits: 4, Rotation: RotationHadamard,
+	kv, _ := New(tqdb.KVCacheConfig{
+		Layers: 1, Heads: 1, HeadDim: 64, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 
 	rng := rand.New(rand.NewPCG(77, 0))
@@ -102,8 +112,8 @@ func TestKVCacheGetValue(t *testing.T) {
 }
 
 func TestKVCacheMemoryUsage(t *testing.T) {
-	kv, _ := NewKVCache(KVCacheConfig{
-		Layers: 32, Heads: 32, HeadDim: 128, Bits: 4, Rotation: RotationHadamard,
+	kv, _ := New(tqdb.KVCacheConfig{
+		Layers: 32, Heads: 32, HeadDim: 128, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 
 	rng := rand.New(rand.NewPCG(42, 0))
@@ -133,9 +143,9 @@ func TestKVCacheMemoryUsage(t *testing.T) {
 // --- Packed mode tests ---
 
 func TestKVCachePackedNeedle(t *testing.T) {
-	kv, _ := NewKVCache(KVCacheConfig{
+	kv, _ := New(tqdb.KVCacheConfig{
 		Layers: 1, Heads: 1, HeadDim: 64, Bits: 4,
-		Rotation: RotationHadamard, PackIndices: true,
+		Rotation: tqdb.RotationHadamard, PackIndices: true,
 	})
 
 	rng := rand.New(rand.NewPCG(99, 0))
@@ -171,14 +181,14 @@ func TestKVCachePackedMemorySavings(t *testing.T) {
 	rng := rand.New(rand.NewPCG(42, 0))
 
 	// Unpacked
-	kvUnpacked, _ := NewKVCache(KVCacheConfig{
+	kvUnpacked, _ := New(tqdb.KVCacheConfig{
 		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4,
-		Rotation: RotationHadamard, PackIndices: false,
+		Rotation: tqdb.RotationHadamard, PackIndices: false,
 	})
 	// Packed
-	kvPacked, _ := NewKVCache(KVCacheConfig{
+	kvPacked, _ := New(tqdb.KVCacheConfig{
 		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4,
-		Rotation: RotationHadamard, PackIndices: true,
+		Rotation: tqdb.RotationHadamard, PackIndices: true,
 	})
 
 	for range 1000 {
@@ -205,9 +215,9 @@ func TestKVCachePackedMemorySavings(t *testing.T) {
 }
 
 func TestKVCachePackedGetValue(t *testing.T) {
-	kv, _ := NewKVCache(KVCacheConfig{
+	kv, _ := New(tqdb.KVCacheConfig{
 		Layers: 1, Heads: 1, HeadDim: 64, Bits: 4,
-		Rotation: RotationHadamard, PackIndices: true,
+		Rotation: tqdb.RotationHadamard, PackIndices: true,
 	})
 
 	rng := rand.New(rand.NewPCG(55, 0))
@@ -233,10 +243,10 @@ func TestKVCachePackedGetValue(t *testing.T) {
 // --- Outlier detection tests ---
 
 func TestKVCacheOutlierDetection(t *testing.T) {
-	kv, err := NewKVCache(KVCacheConfig{
+	kv, err := New(tqdb.KVCacheConfig{
 		Layers: 1, Heads: 1, HeadDim: 64, Bits: 3,
 		OutlierBits: 5, NumOutliers: 8,
-		Rotation: RotationHadamard,
+		Rotation: tqdb.RotationHadamard,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -276,8 +286,8 @@ func TestKVCacheOutlierDetection(t *testing.T) {
 }
 
 func BenchmarkKVCacheAppendKey(b *testing.B) {
-	kv, _ := NewKVCache(KVCacheConfig{
-		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4, Rotation: RotationHadamard,
+	kv, _ := New(tqdb.KVCacheConfig{
+		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 	rng := rand.New(rand.NewPCG(42, 0))
 	key := randomVector(128, rng)
@@ -288,8 +298,8 @@ func BenchmarkKVCacheAppendKey(b *testing.B) {
 }
 
 func BenchmarkKVCacheAttentionScores(b *testing.B) {
-	kv, _ := NewKVCache(KVCacheConfig{
-		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4, Rotation: RotationHadamard,
+	kv, _ := New(tqdb.KVCacheConfig{
+		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 	rng := rand.New(rand.NewPCG(42, 0))
 	for range 1000 {
@@ -303,9 +313,9 @@ func BenchmarkKVCacheAttentionScores(b *testing.B) {
 }
 
 func BenchmarkKVCacheAttentionScoresPacked(b *testing.B) {
-	kv, _ := NewKVCache(KVCacheConfig{
+	kv, _ := New(tqdb.KVCacheConfig{
 		Layers: 1, Heads: 1, HeadDim: 128, Bits: 4,
-		Rotation: RotationHadamard, PackIndices: true,
+		Rotation: tqdb.RotationHadamard, PackIndices: true,
 	})
 	rng := rand.New(rand.NewPCG(42, 0))
 	for range 1000 {

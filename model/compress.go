@@ -1,11 +1,10 @@
-package tqdb
+package model
 
 import (
 	"bufio"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/scotteveritt/tqdb/internal/codec"
 	"math"
 	"os"
 	"runtime"
@@ -13,70 +12,25 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/internal/codec"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
+	"github.com/scotteveritt/tqdb/quantize"
 )
 
-// ModelConfig controls model weight quantization.
-type ModelConfig struct {
-	Bits     int          // bits per coordinate (default: 4)
-	Rotation RotationType // rotation algorithm (default: RotationHadamard)
-	Seed     uint64       // rotation seed (default: 42)
-	Workers  int          // concurrent workers per tensor (default: GOMAXPROCS)
-}
-
-func (c ModelConfig) withDefaults() ModelConfig {
-	if c.Bits == 0 {
-		c.Bits = 4
-	}
-	if c.Seed == 0 {
-		c.Seed = 42
-	}
-	if c.Workers <= 0 {
-		c.Workers = runtime.GOMAXPROCS(0)
-	}
-	return c
-}
-
-// TQModelHeader is the JSON header of a .tqm file.
-type TQModelHeader struct {
-	Version  int                      `json:"version"`
-	Source   string                   `json:"source,omitempty"`
-	Bits     int                      `json:"bits"`
-	Packed   bool                     `json:"packed"`
-	Rotation string                   `json:"rotation"`
-	Seed     uint64                   `json:"seed"`
-	Tensors  map[string]TQMTensorInfo `json:"tensors"`
-}
-
-// TQMTensorInfo describes a quantized tensor in a .tqm file.
-type TQMTensorInfo struct {
-	Shape     []int64 `json:"shape"`
-	OrigDType string  `json:"orig_dtype"`
-	Rows      int     `json:"rows"`
-	RowDim    int     `json:"row_dim"`
-	WorkDim   int     `json:"work_dim"`
-	Offset    int64   `json:"offset"`
-	Size      int64   `json:"size"`
-	AvgCosSim float64 `json:"avg_cos_sim"`
-}
-
-// CompressModelProgress reports compression progress.
-// Called from the main goroutine with the current tensor and row counts.
-type CompressModelProgress func(tensorName string, tensorIdx, totalTensors int, rows, totalRows int)
-
-// CompressModel quantizes a SafeTensors file and writes a .tqm file.
+// Compress quantizes a SafeTensors file and writes a .tqm file.
 //
 // Row quantization is parallelized across Workers goroutines per tensor.
 // Each worker reads rows from a channel, quantizes them, and writes the
 // packed result directly to a pre-allocated slot in the output buffer.
 // No coordination is needed for writes since each row has a unique slot.
-func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progress CompressModelProgress) (*TQModelHeader, error) {
-	cfg = cfg.withDefaults()
+func Compress(sf *tqdb.SafeTensorsFile, outPath string, cfg tqdb.ModelConfig, progress tqdb.CompressModelProgress) (*tqdb.TQModelHeader, error) {
+	cfg = withDefaults(cfg)
 
 	// Collect quantizable tensors (2D weight matrices with float dtypes).
 	type tensorWork struct {
 		name string
-		info TensorInfo
+		info tqdb.TensorInfo
 	}
 	var work []tensorWork
 	for _, name := range sf.TensorNames() {
@@ -94,12 +48,12 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 	})
 
 	// Quantizer cache — one per unique row dimension.
-	quantizers := make(map[int]*TurboQuantMSE)
-	getQuantizer := func(dim int) (*TurboQuantMSE, error) {
+	quantizers := make(map[int]*quantize.TurboQuantMSE)
+	getQuantizer := func(dim int) (*quantize.TurboQuantMSE, error) {
 		if q, ok := quantizers[dim]; ok {
 			return q, nil
 		}
-		q, err := NewMSE(Config{
+		q, err := quantize.NewMSE(tqdb.Config{
 			Dim:      dim,
 			Bits:     cfg.Bits,
 			Rotation: cfg.Rotation,
@@ -112,7 +66,7 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 		return q, nil
 	}
 
-	tqmTensors := make(map[string]TQMTensorInfo)
+	tqmTensors := make(map[string]tqdb.TQMTensorInfo)
 	type tensorResult struct {
 		name string
 		data []byte
@@ -131,7 +85,7 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 			return nil, fmt.Errorf("tensor %s: create quantizer: %w", tw.name, err)
 		}
 
-		workDim := q.rotation.WorkDim()
+		workDim := q.Rotation().WorkDim()
 		packedLen := codec.PackedSize(workDim, bits)
 		packedRowSize := packedLen + 4 // packed indices + float32 norm
 		tensorSize := int64(rows) * int64(packedRowSize)
@@ -244,7 +198,7 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 			avgCosSim = float64(cosSimSum.Load()) / (float64(n) * 1e9)
 		}
 
-		tqmTensors[tw.name] = TQMTensorInfo{
+		tqmTensors[tw.name] = tqdb.TQMTensorInfo{
 			Shape:     tw.info.Shape,
 			OrigDType: tw.info.DType,
 			Rows:      rows,
@@ -261,10 +215,10 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 
 	// Build header.
 	rotName := "qr"
-	if cfg.Rotation == RotationHadamard {
+	if cfg.Rotation == tqdb.RotationHadamard {
 		rotName = "hadamard"
 	}
-	header := &TQModelHeader{
+	header := &tqdb.TQModelHeader{
 		Version:  1,
 		Source:   sf.Metadata()["format"],
 		Bits:     cfg.Bits,
@@ -285,7 +239,7 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 	if err != nil {
 		return nil, err
 	}
-	cleanup := func(err error) (*TQModelHeader, error) {
+	cleanup := func(err error) (*tqdb.TQModelHeader, error) {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
 		return nil, err
@@ -322,32 +276,15 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 	return header, nil
 }
 
-// OpenTQModel opens a .tqm file and returns its header.
-func OpenTQModel(path string) (*TQModelHeader, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+func withDefaults(c tqdb.ModelConfig) tqdb.ModelConfig {
+	if c.Bits == 0 {
+		c.Bits = 4
 	}
-	defer f.Close() //nolint:errcheck
-
-	var lenBuf [8]byte
-	if _, err := f.Read(lenBuf[:]); err != nil {
-		return nil, fmt.Errorf("read header length: %w", err)
+	if c.Seed == 0 {
+		c.Seed = 42
 	}
-	headerLen := binary.LittleEndian.Uint64(lenBuf[:])
-	if headerLen > 100_000_000 {
-		return nil, fmt.Errorf("header too large: %d bytes", headerLen)
+	if c.Workers <= 0 {
+		c.Workers = runtime.GOMAXPROCS(0)
 	}
-
-	headerJSON := make([]byte, headerLen)
-	if _, err := f.Read(headerJSON); err != nil {
-		return nil, fmt.Errorf("read header: %w", err)
-	}
-
-	var header TQModelHeader
-	if err := json.Unmarshal(headerJSON, &header); err != nil {
-		return nil, fmt.Errorf("parse header: %w", err)
-	}
-
-	return &header, nil
+	return c
 }

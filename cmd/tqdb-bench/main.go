@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/store"
 )
 
 type Document struct {
@@ -64,12 +64,12 @@ func main() {
 	// ================================================================
 	fmt.Println("Opening tqdb store...")
 	openStart := time.Now()
-	store, err := tqdb.OpenStore(*tqdbPath)
+	s, err := store.Open(*tqdbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close() //nolint:errcheck
+	defer s.Close() //nolint:errcheck
 	openTime := time.Since(openStart)
 
 	var memTqdb runtime.MemStats
@@ -77,7 +77,7 @@ func main() {
 	runtime.ReadMemStats(&memTqdb)
 
 	fmt.Printf("  %d vectors opened in %s (heap: %s)\n\n",
-		store.Len(), openTime.Round(time.Microsecond), fmtBytes(int64(memTqdb.Alloc)))
+		s.Len(), openTime.Round(time.Microsecond), fmtBytes(int64(memTqdb.Alloc)))
 
 	// ================================================================
 	// Select random queries from the dataset
@@ -115,7 +115,7 @@ func main() {
 
 		// tqdb search
 		start = time.Now()
-		tResults := store.Search(query64, k)
+		tResults := s.Search(query64, k)
 		results[qi].tqdbTime = time.Since(start)
 		results[qi].tqdbIDs = make([]string, len(tResults))
 		results[qi].tqdbScores = make([]float64, len(tResults))

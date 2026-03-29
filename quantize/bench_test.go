@@ -1,10 +1,12 @@
-package tqdb
+package quantize
 
 import (
-	"github.com/scotteveritt/tqdb/internal/codec"
 	"fmt"
 	"math/rand/v2"
 	"testing"
+
+	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/internal/codec"
 )
 
 func BenchmarkCodebookSolve(b *testing.B) {
@@ -22,7 +24,7 @@ func BenchmarkQuantize(b *testing.B) {
 		for _, bits := range []int{3, 4} {
 			name := fmt.Sprintf("d=%d_%dbit", d, bits)
 			b.Run(name, func(b *testing.B) {
-				q, _ := NewMSE(Config{Dim: d, Bits: bits, Seed: 42})
+				q, _ := NewMSE(tqdb.Config{Dim: d, Bits: bits, Seed: 42})
 				rng := rand.New(rand.NewPCG(42, 0))
 				vec := randomVector(d, rng)
 				b.ResetTimer()
@@ -38,31 +40,13 @@ func BenchmarkDequantize(b *testing.B) {
 	for _, d := range []int{128, 768} {
 		name := fmt.Sprintf("d=%d_4bit", d)
 		b.Run(name, func(b *testing.B) {
-			q, _ := NewMSE(Config{Dim: d, Bits: 4, Seed: 42})
+			q, _ := NewMSE(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
 			rng := rand.New(rand.NewPCG(42, 0))
 			vec := randomVector(d, rng)
 			cv := q.Quantize(vec)
 			b.ResetTimer()
 			for range b.N {
 				q.Dequantize(cv)
-			}
-		})
-	}
-}
-
-func BenchmarkCollectionSearch(b *testing.B) {
-	for _, n := range []int{1000, 10000} {
-		name := fmt.Sprintf("d=128_4bit_n=%d", n)
-		b.Run(name, func(b *testing.B) {
-			rng := rand.New(rand.NewPCG(42, 0))
-			coll, _ := NewCollection(Config{Dim: 128, Bits: 4, Seed: 42})
-			for i := range n {
-				coll.Add(fmt.Sprintf("doc-%d", i), randomVector(128, rng), nil)
-			}
-			query := randomVector(128, rng)
-			b.ResetTimer()
-			for range b.N {
-				coll.Search(query, 10)
 			}
 		})
 	}
@@ -81,7 +65,7 @@ func BenchmarkPack4Bit(b *testing.B) {
 }
 
 func BenchmarkMarshalBinary(b *testing.B) {
-	q, _ := NewMSE(Config{Dim: 3072, Bits: 4, Seed: 42})
+	q, _ := NewMSE(tqdb.Config{Dim: 3072, Bits: 4, Seed: 42})
 	rng := rand.New(rand.NewPCG(42, 0))
 	vec := randomVector(3072, rng)
 	cv := q.Quantize(vec)
@@ -92,7 +76,7 @@ func BenchmarkMarshalBinary(b *testing.B) {
 }
 
 func BenchmarkCosineSimilarity(b *testing.B) {
-	q, _ := NewMSE(Config{Dim: 128, Bits: 4, Seed: 42})
+	q, _ := NewMSE(tqdb.Config{Dim: 128, Bits: 4, Seed: 42})
 	rng := rand.New(rand.NewPCG(42, 0))
 	query := randomVector(128, rng)
 	cv := q.Quantize(randomVector(128, rng))
@@ -103,7 +87,7 @@ func BenchmarkCosineSimilarity(b *testing.B) {
 }
 
 func BenchmarkAsymmetricCosineSimilarity(b *testing.B) {
-	q, _ := NewMSE(Config{Dim: 128, Bits: 4, Seed: 42})
+	q, _ := NewMSE(tqdb.Config{Dim: 128, Bits: 4, Seed: 42})
 	rng := rand.New(rand.NewPCG(42, 0))
 	query := randomVector(128, rng)
 	cv := q.Quantize(randomVector(128, rng))
@@ -114,10 +98,10 @@ func BenchmarkAsymmetricCosineSimilarity(b *testing.B) {
 }
 
 func BenchmarkAsymmetricBatch100(b *testing.B) {
-	q, _ := NewMSE(Config{Dim: 128, Bits: 4, Seed: 42})
+	q, _ := NewMSE(tqdb.Config{Dim: 128, Bits: 4, Seed: 42})
 	rng := rand.New(rand.NewPCG(42, 0))
 	query := randomVector(128, rng)
-	cvs := make([]*CompressedVector, 100)
+	cvs := make([]*tqdb.CompressedVector, 100)
 	for i := range cvs {
 		cvs[i] = q.Quantize(randomVector(128, rng))
 	}
@@ -131,30 +115,12 @@ func BenchmarkQuantizeHadamard(b *testing.B) {
 	for _, d := range []int{128, 768} {
 		name := fmt.Sprintf("d=%d_4bit", d)
 		b.Run(name, func(b *testing.B) {
-			q, _ := NewMSE(Config{Dim: d, Bits: 4, Seed: 42, Rotation: RotationHadamard})
+			q, _ := NewMSE(tqdb.Config{Dim: d, Bits: 4, Seed: 42, Rotation: tqdb.RotationHadamard})
 			rng := rand.New(rand.NewPCG(42, 0))
 			vec := randomVector(d, rng)
 			b.ResetTimer()
 			for range b.N {
 				q.Quantize(vec)
-			}
-		})
-	}
-}
-
-func BenchmarkCollectionSearchHadamard(b *testing.B) {
-	for _, n := range []int{1000, 10000} {
-		name := fmt.Sprintf("d=128_4bit_n=%d", n)
-		b.Run(name, func(b *testing.B) {
-			rng := rand.New(rand.NewPCG(42, 0))
-			coll, _ := NewCollection(Config{Dim: 128, Bits: 4, Seed: 42, Rotation: RotationHadamard})
-			for i := range n {
-				coll.Add(fmt.Sprintf("doc-%d", i), randomVector(128, rng), nil)
-			}
-			query := randomVector(128, rng)
-			b.ResetTimer()
-			for range b.N {
-				coll.Search(query, 10)
 			}
 		})
 	}

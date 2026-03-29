@@ -18,3 +18,6 @@
 
 # Internal docs/plans (not committed)
 docs/
+
+# Claude worktrees
+.claude/

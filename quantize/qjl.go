@@ -1,10 +1,11 @@
-package tqdb
+package quantize
 
 import (
 	"fmt"
 	"math"
 	"math/rand/v2"
 
+	"github.com/scotteveritt/tqdb"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
 )
 
@@ -125,16 +126,16 @@ func (q *QJL) InnerProduct(query, xMSE []float64, signs []int8, residualNorm flo
 // inner product estimation. It uses (Bits-1) bits for MSE quantization
 // and 1 bit for QJL residual correction.
 type TurboQuantProd struct {
-	config Config
+	config tqdb.Config
 	mse    *TurboQuantMSE
 	qjl    *QJL
 }
 
 // NewProd creates a new TurboQuantProd quantizer.
 // The MSE stage uses (Bits-1) bits, and QJL uses 1 bit.
-func NewProd(cfg Config) (*TurboQuantProd, error) {
-	cfg = cfg.withDefaults()
-	if err := cfg.validate(); err != nil {
+func NewProd(cfg tqdb.Config) (*TurboQuantProd, error) {
+	cfg = cfg.WithDefaults()
+	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	if cfg.Bits < 2 {
@@ -159,14 +160,14 @@ func NewProd(cfg Config) (*TurboQuantProd, error) {
 }
 
 // Quantize compresses a vector using MSE (Stage 1) + QJL (Stage 2).
-func (tq *TurboQuantProd) Quantize(vec []float64) *CompressedProdVector {
+func (tq *TurboQuantProd) Quantize(vec []float64) *tqdb.CompressedProdVector {
 	d := tq.config.Dim
 
 	// Stage 1: MSE quantization
 	cv := tq.mse.Quantize(vec)
 
 	// Reconstruct MSE approximation into pooled buffer
-	xMSE := tq.mse.getBuf()
+	xMSE := tq.mse.GetBuf()
 	tq.mse.DequantizeTo(xMSE, cv)
 
 	// Compute residual in-place in xMSE buffer (saves an allocation)
@@ -187,9 +188,9 @@ func (tq *TurboQuantProd) Quantize(vec []float64) *CompressedProdVector {
 	}
 
 	signs := tq.qjl.Sketch(xMSE)
-	tq.mse.putBuf(xMSE)
+	tq.mse.PutBuf(xMSE)
 
-	return &CompressedProdVector{
+	return &tqdb.CompressedProdVector{
 		CompressedVector: *cv,
 		Signs:            signs,
 		ResidualNorm:     float32(residualNorm),
@@ -197,7 +198,7 @@ func (tq *TurboQuantProd) Quantize(vec []float64) *CompressedProdVector {
 }
 
 // Dequantize reconstructs a vector from MSE + QJL compressed form.
-func (tq *TurboQuantProd) Dequantize(cv *CompressedProdVector) []float64 {
+func (tq *TurboQuantProd) Dequantize(cv *tqdb.CompressedProdVector) []float64 {
 	xMSE := tq.mse.Dequantize(&cv.CompressedVector)
 
 	// Add QJL contribution: γ · √(π/2)/m · signs @ S
@@ -221,10 +222,10 @@ func (tq *TurboQuantProd) Dequantize(cv *CompressedProdVector) []float64 {
 
 // InnerProduct computes an unbiased estimate of ⟨query, vec⟩
 // without fully decompressing the vector.
-func (tq *TurboQuantProd) InnerProduct(query []float64, cv *CompressedProdVector) float64 {
-	buf := tq.mse.getBuf()
+func (tq *TurboQuantProd) InnerProduct(query []float64, cv *tqdb.CompressedProdVector) float64 {
+	buf := tq.mse.GetBuf()
 	tq.mse.DequantizeTo(buf, &cv.CompressedVector)
 	ip := tq.qjl.InnerProduct(query, buf, cv.Signs, float64(cv.ResidualNorm))
-	tq.mse.putBuf(buf)
+	tq.mse.PutBuf(buf)
 	return ip
 }

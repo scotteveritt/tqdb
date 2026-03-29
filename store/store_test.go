@@ -1,4 +1,4 @@
-package tqdb
+package store
 
 import (
 	"math"
@@ -6,7 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/scotteveritt/tqdb"
 )
+
+func randomVector(d int, rng *rand.Rand) []float64 {
+	v := make([]float64, d)
+	for i := range v {
+		v[i] = rng.NormFloat64()
+	}
+	return v
+}
 
 func TestFormatHeaderRoundtrip(t *testing.T) {
 	hdr := &fileHeader{
@@ -53,8 +63,8 @@ func TestStoreCreateFlush(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.tq")
 
-	store, err := CreateStore(path, StoreConfig{
-		Dim: 64, Bits: 4, Rotation: RotationHadamard,
+	store, err := Create(path, tqdb.StoreConfig{
+		Dim: 64, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -100,13 +110,13 @@ func TestStoreEmptyFlush(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.tq")
 
-	store, _ := CreateStore(path, StoreConfig{Dim: 32, Bits: 4})
+	store, _ := Create(path, tqdb.StoreConfig{Dim: 32, Bits: 4})
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Should be able to open an empty store.
-	store2, err := OpenStore(path)
+	store2, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,18 +140,18 @@ func TestStoreRoundtrip(t *testing.T) {
 	d := 64
 
 	// Write.
-	store, _ := CreateStore(path, StoreConfig{
-		Dim: d, Bits: 4, Rotation: RotationHadamard,
+	s, _ := Create(path, tqdb.StoreConfig{
+		Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 	vecs := make([][]float64, 500)
 	for i := range 500 {
 		vecs[i] = randomVector(d, rng)
-		_ = store.Add("doc-"+string(rune('A'+i%26))+string(rune('0'+i%10)), vecs[i], nil)
+		_ = s.Add("doc-"+string(rune('A'+i%26))+string(rune('0'+i%10)), vecs[i], nil)
 	}
-	_ = store.Close()
+	_ = s.Close()
 
 	// Read.
-	store2, err := OpenStore(path)
+	store2, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,13 +178,13 @@ func TestStoreSearchNeedle(t *testing.T) {
 	rng := rand.New(rand.NewPCG(456, 0))
 	d := 128
 
-	store, _ := CreateStore(path, StoreConfig{
-		Dim: d, Bits: 4, Rotation: RotationHadamard,
+	s, _ := Create(path, tqdb.StoreConfig{
+		Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 
 	// Add haystack.
 	for i := range 1000 {
-		_ = store.Add(
+		_ = s.Add(
 			"hay-"+string(rune('0'+i/100))+string(rune('0'+(i/10)%10))+string(rune('0'+i%10)),
 			randomVector(d, rng),
 			nil,
@@ -183,11 +193,11 @@ func TestStoreSearchNeedle(t *testing.T) {
 
 	// Add needle.
 	needle := randomVector(d, rng)
-	_ = store.Add("needle", needle, nil)
-	_ = store.Close()
+	_ = s.Add("needle", needle, nil)
+	_ = s.Close()
 
 	// Reopen and search.
-	store2, _ := OpenStore(path)
+	store2, _ := Open(path)
 	defer store2.Close() //nolint:errcheck
 
 	results := store2.Search(needle, 5)
@@ -206,8 +216,8 @@ func TestStoreSearchFilter(t *testing.T) {
 	rng := rand.New(rand.NewPCG(789, 0))
 	d := 64
 
-	store, _ := CreateStore(path, StoreConfig{
-		Dim: d, Bits: 4, Rotation: RotationHadamard,
+	s, _ := Create(path, tqdb.StoreConfig{
+		Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard,
 	})
 
 	for i := range 100 {
@@ -215,11 +225,11 @@ func TestStoreSearchFilter(t *testing.T) {
 		if i%2 == 0 {
 			repo = "repo-b"
 		}
-		_ = store.Add("doc", randomVector(d, rng), map[string]string{"repo": repo})
+		_ = s.Add("doc", randomVector(d, rng), map[string]string{"repo": repo})
 	}
-	_ = store.Close()
+	_ = s.Close()
 
-	store2, _ := OpenStore(path)
+	store2, _ := Open(path)
 	defer store2.Close() //nolint:errcheck
 
 	results := store2.SearchWithFilter(randomVector(d, rng), 10, func(meta map[string]string) bool {
@@ -237,16 +247,16 @@ func TestStoreInfo(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "info.tq")
 
-	store, _ := CreateStore(path, StoreConfig{
-		Dim: 128, Bits: 4, Rotation: RotationHadamard, Seed: 99,
+	s, _ := Create(path, tqdb.StoreConfig{
+		Dim: 128, Bits: 4, Rotation: tqdb.RotationHadamard, Seed: 99,
 	})
 	rng := rand.New(rand.NewPCG(42, 0))
 	for range 50 {
-		_ = store.Add("x", randomVector(128, rng), nil)
+		_ = s.Add("x", randomVector(128, rng), nil)
 	}
-	_ = store.Close()
+	_ = s.Close()
 
-	store2, _ := OpenStore(path)
+	store2, _ := Open(path)
 	defer store2.Close() //nolint:errcheck
 
 	info := store2.Info()
@@ -259,7 +269,7 @@ func TestStoreInfo(t *testing.T) {
 	if info.Bits != 4 {
 		t.Errorf("Bits=%d, want 4", info.Bits)
 	}
-	if info.Rotation != RotationHadamard {
+	if info.Rotation != tqdb.RotationHadamard {
 		t.Errorf("Rotation=%d, want Hadamard", info.Rotation)
 	}
 	if info.Seed != 99 {
@@ -282,22 +292,22 @@ func TestStoreMatchesCollection(t *testing.T) {
 	d := 64
 	n := 200
 
-	cfg := StoreConfig{Dim: d, Bits: 4, Rotation: RotationHadamard, Seed: 42}
+	cfg := tqdb.StoreConfig{Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard, Seed: 42}
 
 	// Build collection.
-	coll, _ := NewCollection(Config{Dim: d, Bits: 4, Rotation: RotationHadamard, Seed: 42})
-	store, _ := CreateStore(path, cfg)
+	coll, _ := NewCollection(tqdb.Config{Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard, Seed: 42})
+	s, _ := Create(path, cfg)
 
 	vecs := make([][]float64, n)
 	for i := range n {
 		vecs[i] = randomVector(d, rng)
 		id := "v" + string(rune('A'+i%26))
 		coll.Add(id, vecs[i], nil)
-		_ = store.Add(id, vecs[i], nil)
+		_ = s.Add(id, vecs[i], nil)
 	}
-	_ = store.Close()
+	_ = s.Close()
 
-	store2, _ := OpenStore(path)
+	store2, _ := Open(path)
 	defer store2.Close() //nolint:errcheck
 
 	query := randomVector(d, rng)

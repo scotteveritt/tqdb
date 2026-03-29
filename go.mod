@@ -4,6 +4,7 @@ go 1.25.5
 
 require (
 	github.com/edsrzf/mmap-go v1.2.0
+	github.com/ollama/ollama v0.18.3
 	gonum.org/v1/gonum v0.17.0
 )
 
@@ -16,7 +17,6 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/flatbuffers v24.3.25+incompatible // indirect
 	github.com/nlpodyssey/gopickle v0.3.0 // indirect
-	github.com/ollama/ollama v0.18.3 // indirect
 	github.com/pdevine/tensor v0.0.0-20240510204454-f88f4562727c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/x448/float16 v0.8.4 // indirect

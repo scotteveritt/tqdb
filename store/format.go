@@ -1,9 +1,11 @@
-package tqdb
+package store
 
 import (
 	"encoding/binary"
 	"fmt"
 	"math"
+
+	"github.com/scotteveritt/tqdb"
 )
 
 // File format constants.
@@ -78,7 +80,7 @@ func decodeHeader(src []byte) (fileHeader, error) {
 }
 
 // encodeFile serializes the complete .tq file into a byte slice.
-func encodeFile(cfg StoreConfig, workDim int, buf *writeBuffer) []byte {
+func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 	numVecs := len(buf.norms)
 	wdim := workDim
 

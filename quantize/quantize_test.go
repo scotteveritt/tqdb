@@ -1,10 +1,11 @@
-package tqdb
+package quantize
 
 import (
 	"math"
 	"math/rand/v2"
 	"testing"
 
+	"github.com/scotteveritt/tqdb"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
 )
 
@@ -35,7 +36,7 @@ func TestMSEDistortionBound(t *testing.T) {
 	rng := rand.New(rand.NewPCG(123, 0))
 
 	for _, bits := range []int{1, 2, 3, 4} {
-		q, err := NewMSE(Config{Dim: d, Bits: bits, Seed: 42})
+		q, err := NewMSE(tqdb.Config{Dim: d, Bits: bits, Seed: 42})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -72,7 +73,7 @@ func TestMSECosineSimilarityPreservation(t *testing.T) {
 	rng := rand.New(rand.NewPCG(456, 0))
 
 	for _, bits := range []int{2, 3, 4} {
-		q, err := NewMSE(Config{Dim: d, Bits: bits, Seed: 42})
+		q, err := NewMSE(tqdb.Config{Dim: d, Bits: bits, Seed: 42})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,7 +100,7 @@ func TestMSECosineSimilarityPreservation(t *testing.T) {
 
 func TestMSEQuantizeFloat32(t *testing.T) {
 	d := 64
-	q, err := NewMSE(Config{Dim: d, Bits: 4, Seed: 42})
+	q, err := NewMSE(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +130,7 @@ func TestMSECosineSimilarityMethod(t *testing.T) {
 	d := 128
 	rng := rand.New(rand.NewPCG(789, 0))
 
-	q, err := NewMSE(Config{Dim: d, Bits: 4, Seed: 42})
+	q, err := NewMSE(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,17 +151,17 @@ func TestMSECosineSimilarityMethod(t *testing.T) {
 }
 
 func TestNewMSEValidation(t *testing.T) {
-	_, err := NewMSE(Config{Dim: 0, Bits: 4})
+	_, err := NewMSE(tqdb.Config{Dim: 0, Bits: 4})
 	if err == nil {
 		t.Error("expected error for Dim=0")
 	}
 
-	_, err = NewMSE(Config{Dim: 128, Bits: 0})
+	_, err = NewMSE(tqdb.Config{Dim: 128, Bits: 0})
 	if err != nil {
 		t.Error("Bits=0 should default to 4, got error:", err)
 	}
 
-	_, err = NewMSE(Config{Dim: 128, Bits: 9})
+	_, err = NewMSE(tqdb.Config{Dim: 128, Bits: 9})
 	if err == nil {
 		t.Error("expected error for Bits=9")
 	}
@@ -168,7 +169,7 @@ func TestNewMSEValidation(t *testing.T) {
 
 func TestAsymmetricCosineSimilarityMatchesExact(t *testing.T) {
 	d := 128
-	q, err := NewMSE(Config{Dim: d, Bits: 4, Seed: 42})
+	q, err := NewMSE(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +191,7 @@ func TestAsymmetricCosineSimilarityMatchesExact(t *testing.T) {
 
 func TestAsymmetricCosineSimilarityBatch(t *testing.T) {
 	d := 64
-	q, err := NewMSE(Config{Dim: d, Bits: 4, Seed: 42})
+	q, err := NewMSE(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +199,7 @@ func TestAsymmetricCosineSimilarityBatch(t *testing.T) {
 
 	query := randomVector(d, rng)
 	n := 50
-	cvs := make([]*CompressedVector, n)
+	cvs := make([]*tqdb.CompressedVector, n)
 	for i := range n {
 		cvs[i] = q.Quantize(randomVector(d, rng))
 	}
@@ -212,6 +213,93 @@ func TestAsymmetricCosineSimilarityBatch(t *testing.T) {
 		single := q.AsymmetricCosineSimilarity(query, cv)
 		if math.Abs(results[i]-single) > 1e-10 {
 			t.Errorf("batch[%d]=%f vs single=%f", i, results[i], single)
+		}
+	}
+}
+
+func TestCompressedVectorMarshalRoundtrip(t *testing.T) {
+	d := 128
+	rng := rand.New(rand.NewPCG(100, 0))
+
+	for _, bits := range []int{1, 2, 3, 4} {
+		q, err := NewMSE(tqdb.Config{Dim: d, Bits: bits, Seed: 42})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		vec := randomVector(d, rng)
+		cv := q.Quantize(vec)
+
+		data, err := cv.MarshalBinary()
+		if err != nil {
+			t.Fatalf("bits=%d: marshal error: %v", bits, err)
+		}
+
+		cv2 := &tqdb.CompressedVector{}
+		err = cv2.UnmarshalBinary(data)
+		if err != nil {
+			t.Fatalf("bits=%d: unmarshal error: %v", bits, err)
+		}
+
+		if cv2.Dim != cv.Dim || cv2.Bits != cv.Bits || cv2.Norm != cv.Norm {
+			t.Errorf("bits=%d: header mismatch", bits)
+		}
+		if len(cv2.Indices) != len(cv.Indices) {
+			t.Errorf("bits=%d: indices length %d vs %d", bits, len(cv2.Indices), len(cv.Indices))
+			continue
+		}
+		for i := range cv.Indices {
+			if cv2.Indices[i] != cv.Indices[i] {
+				t.Errorf("bits=%d idx=%d: got %d, want %d", bits, i, cv2.Indices[i], cv.Indices[i])
+				break
+			}
+		}
+	}
+}
+
+func TestCompressedVectorDequantizeAfterRoundtrip(t *testing.T) {
+	d := 128
+	rng := rand.New(rand.NewPCG(200, 0))
+
+	q, err := NewMSE(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vec := randomVector(d, rng)
+	cv := q.Quantize(vec)
+
+	// Serialize and deserialize
+	data, _ := cv.MarshalBinary()
+	cv2 := &tqdb.CompressedVector{}
+	_ = cv2.UnmarshalBinary(data)
+
+	// Both should dequantize to the same vector
+	recon1 := q.Dequantize(cv)
+	recon2 := q.Dequantize(cv2)
+
+	sim := mathutil.CosineSimilarity(recon1, recon2)
+	if sim < 0.9999 {
+		t.Errorf("dequantized vectors differ after roundtrip: cosine sim = %f", sim)
+	}
+}
+
+func TestCompressedVectorSize(t *testing.T) {
+	tests := []struct {
+		dim, bits int
+		wantSize  int
+	}{
+		{3072, 4, 7 + 1536},
+		{3072, 2, 7 + 768},
+		{3072, 3, 7 + 1152},
+		{1536, 4, 7 + 768},
+	}
+
+	for _, tt := range tests {
+		cv := &tqdb.CompressedVector{Dim: tt.dim, Bits: tt.bits}
+		got := cv.Size()
+		if got != tt.wantSize {
+			t.Errorf("dim=%d bits=%d: Size()=%d, want %d", tt.dim, tt.bits, got, tt.wantSize)
 		}
 	}
 }

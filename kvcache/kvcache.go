@@ -1,25 +1,15 @@
-package tqdb
+package kvcache
 
 import (
 	"fmt"
-	"github.com/scotteveritt/tqdb/internal/codec"
 	"math"
 	"sort"
 	"sync"
-)
 
-// KVCacheConfig controls KV cache creation.
-type KVCacheConfig struct {
-	Layers      int          // number of transformer layers
-	Heads       int          // number of attention heads
-	HeadDim     int          // dimension per head (typically 64 or 128)
-	Bits        int          // quantization bits for regular channels (default: 4)
-	OutlierBits int          // bits for outlier channels (default: Bits+1, 0=no outliers)
-	NumOutliers int          // number of outlier channels to detect (default: 0=disabled)
-	PackIndices bool         // bit-pack indices in storage (default: false)
-	Rotation    RotationType // rotation algorithm (default: RotationHadamard)
-	Seed        uint64       // rotation seed (default: 42)
-}
+	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/internal/codec"
+	"github.com/scotteveritt/tqdb/quantize"
+)
 
 // KVCache provides TurboQuant-compressed KV cache storage for transformer inference.
 //
@@ -37,7 +27,7 @@ type KVCache struct {
 	scale    float64 // 1/√headDim
 
 	// Quantizer for regular channels.
-	quantizer *TurboQuantMSE
+	quantizer *quantize.TurboQuantMSE
 	workDim   int
 
 	// Outlier handling (nil if disabled).
@@ -53,8 +43,8 @@ type outlierConfig struct {
 	mask         []bool // length headDim: true = outlier channel
 	regularIdx   []int  // indices of regular channels
 	outlierIdx   []int  // indices of outlier channels
-	regularQuant *TurboQuantMSE
-	outlierQuant *TurboQuantMSE
+	regularQuant *quantize.TurboQuantMSE
+	outlierQuant *quantize.TurboQuantMSE
 	regularWork  int
 	outlierWork  int
 	initialized  bool
@@ -69,8 +59,8 @@ type kvHead struct {
 	rowSize int // bytes per position in data
 }
 
-// NewKVCache creates a compressed KV cache for transformer inference.
-func NewKVCache(cfg KVCacheConfig) (*KVCache, error) {
+// New creates a compressed KV cache for transformer inference.
+func New(cfg tqdb.KVCacheConfig) (*KVCache, error) {
 	if cfg.Bits == 0 {
 		cfg.Bits = 4
 	}
@@ -81,7 +71,7 @@ func NewKVCache(cfg KVCacheConfig) (*KVCache, error) {
 		cfg.OutlierBits = cfg.Bits + 1
 	}
 
-	q, err := NewMSE(Config{
+	q, err := quantize.NewMSE(tqdb.Config{
 		Dim:      cfg.HeadDim,
 		Bits:     cfg.Bits,
 		Rotation: cfg.Rotation,
@@ -91,7 +81,7 @@ func NewKVCache(cfg KVCacheConfig) (*KVCache, error) {
 		return nil, fmt.Errorf("tqdb: create KV quantizer: %w", err)
 	}
 
-	workDim := q.rotation.WorkDim()
+	workDim := q.Rotation().WorkDim()
 	rowSize := workDim
 	if cfg.PackIndices {
 		rowSize = codec.PackedSize(workDim, cfg.Bits)
@@ -123,7 +113,7 @@ func NewKVCache(cfg KVCacheConfig) (*KVCache, error) {
 
 	// Set up outlier handling if requested.
 	if cfg.NumOutliers > 0 && cfg.NumOutliers < cfg.HeadDim {
-		oq, err := NewMSE(Config{
+		oq, err := quantize.NewMSE(tqdb.Config{
 			Dim:      cfg.NumOutliers,
 			Bits:     cfg.OutlierBits,
 			Rotation: cfg.Rotation,
@@ -137,7 +127,7 @@ func NewKVCache(cfg KVCacheConfig) (*KVCache, error) {
 			numOutliers:  cfg.NumOutliers,
 			mask:         make([]bool, cfg.HeadDim),
 			outlierQuant: oq,
-			outlierWork:  oq.rotation.WorkDim(),
+			outlierWork:  oq.Rotation().WorkDim(),
 		}
 		// regularQuant will be created after outlier detection (lazy init)
 	}
@@ -203,15 +193,15 @@ func (kv *KVCache) DetectOutliers(vectors [][]float64) {
 
 	// Create regular quantizer for the non-outlier channels.
 	regularDim := len(kv.outlier.regularIdx)
-	rq, err := NewMSE(Config{
+	rq, err := quantize.NewMSE(tqdb.Config{
 		Dim:      regularDim,
 		Bits:     kv.bits,
-		Rotation: kv.quantizer.config.Rotation,
-		Seed:     kv.quantizer.config.Seed,
+		Rotation: kv.quantizer.GetConfig().Rotation,
+		Seed:     kv.quantizer.GetConfig().Seed,
 	})
 	if err == nil {
 		kv.outlier.regularQuant = rq
-		kv.outlier.regularWork = rq.rotation.WorkDim()
+		kv.outlier.regularWork = rq.Rotation().WorkDim()
 	}
 
 	kv.outlier.initialized = true
@@ -262,7 +252,7 @@ func (kv *KVCache) AttentionScores(layer, head int, query []float64) []float64 {
 	}
 
 	wd := kv.workDim
-	centroids := kv.quantizer.codebook.Centroids
+	centroids := kv.quantizer.Codebook().Centroids
 	scale := kv.scale
 
 	// Normalize + rotate query.
@@ -277,13 +267,13 @@ func (kv *KVCache) AttentionScores(layer, head int, query []float64) []float64 {
 	}
 
 	invQN := 1.0 / qNorm
-	unitQ := kv.quantizer.getBuf()
+	unitQ := kv.quantizer.GetBuf()
 	for i, v := range query {
 		unitQ[i] = v * invQN
 	}
-	qRot := kv.quantizer.getBuf()
-	kv.quantizer.rotation.Rotate(qRot, unitQ[:kv.headDim])
-	kv.quantizer.putBuf(unitQ)
+	qRot := kv.quantizer.GetBuf()
+	kv.quantizer.Rotation().Rotate(qRot, unitQ[:kv.headDim])
+	kv.quantizer.PutBuf(unitQ)
 
 	scores := make([]float64, n)
 	kNorms := h.norms
@@ -315,7 +305,7 @@ func (kv *KVCache) AttentionScores(layer, head int, query []float64) []float64 {
 		}
 	}
 
-	kv.quantizer.putBuf(qRot)
+	kv.quantizer.PutBuf(qRot)
 	kv.mu.RUnlock()
 	return scores
 }
@@ -337,7 +327,7 @@ func (kv *KVCache) GetValue(layer, head, pos int) []float64 {
 	}
 	kv.mu.RUnlock()
 
-	cv := &CompressedVector{
+	cv := &tqdb.CompressedVector{
 		Dim:     kv.headDim,
 		Bits:    kv.bits,
 		Norm:    norm,
@@ -362,7 +352,7 @@ func (kv *KVCache) EffectiveBitsPerElement() float64 {
 	nReg := float64(len(kv.outlier.regularIdx))
 	nOut := float64(len(kv.outlier.outlierIdx))
 	regBits := float64(kv.bits)
-	outBits := float64(kv.outlier.outlierQuant.config.Bits)
+	outBits := float64(kv.outlier.outlierQuant.GetConfig().Bits)
 	return (nReg*regBits + nOut*outBits) / (nReg + nOut)
 }
 

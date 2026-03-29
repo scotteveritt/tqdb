@@ -15,6 +15,8 @@ import (
 
 	"github.com/ollama/ollama/convert"
 	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/model"
+	"github.com/scotteveritt/tqdb/store"
 )
 
 const version = "0.1.0"
@@ -125,7 +127,7 @@ func runCreate(args []string) {
 		os.Exit(1)
 	}
 
-	store, err := tqdb.CreateStore(path, tqdb.StoreConfig{
+	s, err := store.Create(path, tqdb.StoreConfig{
 		Dim:      *dim,
 		Bits:     *bits,
 		Rotation: rot,
@@ -135,7 +137,7 @@ func runCreate(args []string) {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	if err := store.Close(); err != nil {
+	if err := s.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -168,12 +170,12 @@ func runAdd(args []string) {
 	}
 
 	// Try to open existing store first.
-	var store *tqdb.Store
+	var s *store.Store
 	var err error
 
 	if _, statErr := os.Stat(path); statErr == nil {
 		// File exists — open, load existing data, add new.
-		existing, openErr := tqdb.OpenStore(path)
+		existing, openErr := store.Open(path)
 		if openErr != nil {
 			fmt.Fprintf(os.Stderr, "error opening existing store: %v\n", openErr)
 			os.Exit(1)
@@ -182,7 +184,7 @@ func runAdd(args []string) {
 		_ = existing.Close()
 
 		// Re-create with same config to add vectors.
-		store, err = tqdb.CreateStore(path, tqdb.StoreConfig{
+		s, err = store.Create(path, tqdb.StoreConfig{
 			Dim:      info.Dim,
 			Bits:     info.Bits,
 			Rotation: info.Rotation,
@@ -207,7 +209,7 @@ func runAdd(args []string) {
 		default:
 			rot = tqdb.RotationQR
 		}
-		store, err = tqdb.CreateStore(path, tqdb.StoreConfig{
+		s, err = store.Create(path, tqdb.StoreConfig{
 			Dim:      *dim,
 			Bits:     *bits,
 			Rotation: rot,
@@ -244,14 +246,14 @@ func runAdd(args []string) {
 		if rec.ID == "" {
 			rec.ID = fmt.Sprintf("vec-%d", count)
 		}
-		if err := store.Add(rec.ID, rec.Vector, rec.Metadata); err != nil {
+		if err := s.Add(rec.ID, rec.Vector, rec.Metadata); err != nil {
 			fmt.Fprintf(os.Stderr, "error adding %s: %v\n", rec.ID, err)
 			os.Exit(1)
 		}
 		count++
 	}
 
-	if err := store.Close(); err != nil {
+	if err := s.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -286,14 +288,14 @@ func runSearch(args []string) {
 		os.Exit(1)
 	}
 
-	store, err := tqdb.OpenStore(path)
+	s, err := store.Open(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close() //nolint:errcheck
+	defer s.Close() //nolint:errcheck
 
-	results := store.Search(query, *topK)
+	results := s.Search(query, *topK)
 
 	switch *format {
 	case "json":
@@ -320,14 +322,14 @@ func runInfo(args []string) {
 		os.Exit(1)
 	}
 
-	store, err := tqdb.OpenStore(path)
+	s, err := store.Open(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	defer store.Close() //nolint:errcheck
+	defer s.Close() //nolint:errcheck
 
-	info := store.Info()
+	info := s.Info()
 
 	rotName := "qr"
 	if info.Rotation == tqdb.RotationHadamard {
@@ -469,7 +471,7 @@ func importChromem(outPath, dir string, bits int, rot tqdb.RotationType, seed ui
 	dim := len(firstDoc.Embedding)
 	fmt.Printf("detected dimension: %d\n", dim)
 
-	store, err := tqdb.CreateStore(outPath, tqdb.StoreConfig{
+	s, err := store.Create(outPath, tqdb.StoreConfig{
 		Dim:      dim,
 		Bits:     bits,
 		Rotation: rot,
@@ -501,7 +503,7 @@ func importChromem(outPath, dir string, bits int, rot tqdb.RotationType, seed ui
 			vec[j] = float64(v)
 		}
 
-		if err := store.Add(doc.ID, vec, doc.Metadata); err != nil {
+		if err := s.Add(doc.ID, vec, doc.Metadata); err != nil {
 			skipped++
 			continue
 		}
@@ -517,7 +519,7 @@ func importChromem(outPath, dir string, bits int, rot tqdb.RotationType, seed ui
 	}
 
 	fmt.Printf("flushing %d vectors to %s...\n", imported, outPath)
-	if err := store.Close(); err != nil {
+	if err := s.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -560,7 +562,7 @@ func importJSONL(outPath, fromFile string, dim, bits int, rot tqdb.RotationType,
 		os.Exit(1)
 	}
 
-	store, err := tqdb.CreateStore(outPath, tqdb.StoreConfig{
+	s, err := store.Create(outPath, tqdb.StoreConfig{
 		Dim:      dim,
 		Bits:     bits,
 		Rotation: rot,
@@ -583,7 +585,7 @@ func importJSONL(outPath, fromFile string, dim, bits int, rot tqdb.RotationType,
 		if id == "" {
 			id = fmt.Sprintf("vec-%d", imported)
 		}
-		if err := store.Add(id, rec.Vector, rec.Metadata); err != nil {
+		if err := s.Add(id, rec.Vector, rec.Metadata); err != nil {
 			skipped++
 			continue
 		}
@@ -591,7 +593,7 @@ func importJSONL(outPath, fromFile string, dim, bits int, rot tqdb.RotationType,
 	}
 
 	fmt.Printf("flushing %d vectors to %s...\n", imported, outPath)
-	if err := store.Close(); err != nil {
+	if err := s.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -684,7 +686,7 @@ func runCompress(args []string) {
 	fmt.Printf("  %d tensors found\n\n", sf.NumTensors())
 
 	start := time.Now()
-	header, err := tqdb.CompressModel(sf, *output, tqdb.ModelConfig{
+	header, err := model.Compress(sf, *output, tqdb.ModelConfig{
 		Bits:     *bits,
 		Rotation: rot,
 		Seed:     *seed,
@@ -732,7 +734,7 @@ func runInspect(args []string) {
 		os.Exit(1)
 	}
 
-	header, err := tqdb.OpenTQModel(path)
+	header, err := model.OpenTQM(path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

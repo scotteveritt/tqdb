@@ -1,10 +1,11 @@
-package tqdb
+package quantize
 
 import (
 	"math"
 	"math/rand/v2"
 	"testing"
 
+	"github.com/scotteveritt/tqdb"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
 )
 
@@ -16,7 +17,7 @@ func TestQJLUnbiasedness(t *testing.T) {
 	rng := rand.New(rand.NewPCG(300, 0))
 
 	for _, bits := range []int{2, 3, 4} {
-		pq, err := NewProd(Config{Dim: d, Bits: bits, Seed: 42})
+		pq, err := NewProd(tqdb.Config{Dim: d, Bits: bits, Seed: 42})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -49,7 +50,7 @@ func TestMSEOnlyBias(t *testing.T) {
 	n := 1000
 	rng := rand.New(rand.NewPCG(400, 0))
 
-	q, err := NewMSE(Config{Dim: d, Bits: 3, Seed: 42})
+	q, err := NewMSE(tqdb.Config{Dim: d, Bits: 3, Seed: 42})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,12 +83,12 @@ func TestMSEOnlyBias(t *testing.T) {
 }
 
 func TestProdQuantizerValidation(t *testing.T) {
-	_, err := NewProd(Config{Dim: 128, Bits: 1})
+	_, err := NewProd(tqdb.Config{Dim: 128, Bits: 1})
 	if err == nil {
 		t.Error("expected error for Bits=1 with TurboQuantProd")
 	}
 
-	pq, err := NewProd(Config{Dim: 64, Bits: 4})
+	pq, err := NewProd(tqdb.Config{Dim: 64, Bits: 4})
 	if err != nil {
 		t.Fatal(err)
 	}

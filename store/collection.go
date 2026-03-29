@@ -1,22 +1,14 @@
-package tqdb
+package store
 
 import (
 	"math"
 	"sort"
 	"sync"
 
+	"github.com/scotteveritt/tqdb"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
+	"github.com/scotteveritt/tqdb/quantize"
 )
-
-// Result represents a search result from a Collection or Store.
-type Result struct {
-	ID       string
-	Score    float64 // inner product similarity (≈ cosine sim for unit-normalized vectors)
-	Metadata map[string]string
-}
-
-// Filter is a predicate for filtering entries during search.
-type Filter func(metadata map[string]string) bool
 
 // Collection stores compressed vectors for batch search.
 // It uses contiguous index storage and the rotated-space optimization
@@ -28,7 +20,7 @@ type Filter func(metadata map[string]string) bool
 // Safe for concurrent Add and Search after construction.
 type Collection struct {
 	mu        sync.RWMutex
-	quantizer *TurboQuantMSE
+	quantizer *quantize.TurboQuantMSE
 	dim       int
 
 	// Contiguous storage for cache-friendly search.
@@ -40,14 +32,14 @@ type Collection struct {
 }
 
 // NewCollection creates a new Collection with the given quantizer config.
-func NewCollection(cfg Config) (*Collection, error) {
-	q, err := NewMSE(cfg)
+func NewCollection(cfg tqdb.Config) (*Collection, error) {
+	q, err := quantize.NewMSE(cfg)
 	if err != nil {
 		return nil, err
 	}
 	return &Collection{
 		quantizer: q,
-		dim:       q.rotation.WorkDim(),
+		dim:       q.Rotation().WorkDim(),
 	}, nil
 }
 
@@ -63,7 +55,7 @@ func (c *Collection) AddFloat32(id string, vec []float32, metadata map[string]st
 }
 
 // AddCompressed stores a pre-compressed vector.
-func (c *Collection) AddCompressed(id string, cv *CompressedVector, metadata map[string]string) {
+func (c *Collection) AddCompressed(id string, cv *tqdb.CompressedVector, metadata map[string]string) {
 	c.addCompressed(id, cv.Indices, cv.Norm, metadata)
 }
 
@@ -81,21 +73,21 @@ func (c *Collection) addCompressed(id string, indices []uint8, norm float32, met
 // Scoring uses the inner product in rotated space: ⟨Π·q̂, centroids[idx]⟩
 // where q̂ = q/‖q‖. Since stored vectors are unit-normalized before quantization,
 // this equals cosine similarity without the noise of centroid-norm correction.
-func (c *Collection) Search(query []float64, topK int) []Result {
+func (c *Collection) Search(query []float64, topK int) []tqdb.Result {
 	return c.searchInternal(query, topK, nil)
 }
 
 // SearchWithFilter finds the top-k most similar vectors matching the filter.
-func (c *Collection) SearchWithFilter(query []float64, topK int, filter Filter) []Result {
+func (c *Collection) SearchWithFilter(query []float64, topK int, filter tqdb.Filter) []tqdb.Result {
 	return c.searchInternal(query, topK, filter)
 }
 
 // SearchFloat32 is a convenience wrapper for float32 queries.
-func (c *Collection) SearchFloat32(query []float32, topK int) []Result {
+func (c *Collection) SearchFloat32(query []float32, topK int) []tqdb.Result {
 	return c.Search(mathutil.Float32ToFloat64(query), topK)
 }
 
-func (c *Collection) searchInternal(query []float64, topK int, filter Filter) []Result {
+func (c *Collection) searchInternal(query []float64, topK int, filter tqdb.Filter) []tqdb.Result {
 	c.mu.RLock()
 	n := len(c.norms)
 	if n == 0 {
@@ -104,25 +96,25 @@ func (c *Collection) searchInternal(query []float64, topK int, filter Filter) []
 	}
 
 	d := c.dim
-	centroids := c.quantizer.codebook.Centroids
+	centroids := c.quantizer.Codebook().Centroids
 
 	// Rotate the unit query once — O(d²) or O(d log d) for Hadamard.
-	queryRotated := c.quantizer.getBuf()
+	queryRotated := c.quantizer.GetBuf()
 	queryNorm := mathutil.Norm(query)
 	if queryNorm < 1e-15 {
-		c.quantizer.putBuf(queryRotated)
+		c.quantizer.PutBuf(queryRotated)
 		c.mu.RUnlock()
 		return nil
 	}
 
 	// Normalize query before rotation so the inner product = cosine similarity.
 	invQN := 1.0 / queryNorm
-	unitQuery := c.quantizer.getBuf()
+	unitQuery := c.quantizer.GetBuf()
 	for i, v := range query {
 		unitQuery[i] = v * invQN
 	}
-	c.quantizer.rotation.Rotate(queryRotated, unitQuery[:c.quantizer.config.Dim])
-	c.quantizer.putBuf(unitQuery)
+	c.quantizer.Rotation().Rotate(queryRotated, unitQuery[:c.quantizer.GetConfig().Dim])
+	c.quantizer.PutBuf(unitQuery)
 
 	// Top-k via sorted-insert.
 	type scored struct {
@@ -176,11 +168,11 @@ func (c *Collection) searchInternal(query []float64, topK int, filter Filter) []
 		}
 	}
 
-	c.quantizer.putBuf(queryRotated)
+	c.quantizer.PutBuf(queryRotated)
 
-	results := make([]Result, len(topBuf))
+	results := make([]tqdb.Result, len(topBuf))
 	for i, s := range topBuf {
-		results[i] = Result{
+		results[i] = tqdb.Result{
 			ID:       c.ids[s.idx],
 			Score:    s.score,
 			Metadata: c.metadata[s.idx],
