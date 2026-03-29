@@ -17,13 +17,12 @@ linters:
     - nolintlint
     - errorlint
     - nilerr
-
-linters-settings:
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - performance
-    disabled-checks:
-      - hugeParam
-  errcheck:
-    check-type-assertions: true
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam
+    errcheck:
+      check-type-assertions: true

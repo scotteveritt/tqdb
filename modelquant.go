@@ -235,7 +235,7 @@ func CompressModel(sf *SafeTensorsFile, outPath string, cfg ModelConfig, progres
 
 		// Check for worker errors.
 		if errVal := firstErr.Load(); errVal != nil {
-			return nil, errVal.(error)
+			return nil, errVal.(error) //nolint:errcheck // type guaranteed by CompareAndSwap
 		}
 
 		// Compute average cosine similarity.

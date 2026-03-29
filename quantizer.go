@@ -104,7 +104,7 @@ func NewMSE(cfg Config) (*TurboQuantMSE, error) {
 }
 
 func (tq *TurboQuantMSE) getBuf() []float64 {
-	bp := tq.bufPool.Get().(*[]float64)
+	bp := tq.bufPool.Get().(*[]float64) //nolint:errcheck // pool always returns *[]float64
 	return *bp
 }
 
