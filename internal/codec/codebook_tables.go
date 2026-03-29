@@ -16,7 +16,7 @@ type PrecomputedEntry struct {
 	Boundaries []float64
 }
 
-// PrecomputedCodebooks will be populated by init() after we generate the tables.
-// For now, this is empty — the solver will be called on first use.
-// TODO: populate with precomputed values after validating the solver output.
+// PrecomputedCodebooks is empty — the solver runs on first use (~10ms).
+// Precomputed tables can be added here for common (dim, bits) pairs to
+// skip the solve step.
 var PrecomputedCodebooks = map[PrecomputedKey]PrecomputedEntry{}
