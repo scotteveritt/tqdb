@@ -304,7 +304,7 @@ func TestStoreMatchesCollection(t *testing.T) {
 	for i := range n {
 		vecs[i] = randomVector(d, rng)
 		id := fmt.Sprintf("v%d", i)
-		_ = coll.Add(id, vecs[i], nil)
+		coll.Add(id, vecs[i], nil)
 		_ = s.Add(id, vecs[i], nil)
 	}
 	_ = s.Close()

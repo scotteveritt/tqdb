@@ -80,35 +80,33 @@ func NewCollectionWithConfig(cfg CollectionConfig) (*Collection, error) {
 }
 
 // Add compresses and stores a vector with its ID and data fields.
-// Returns an error if the ID already exists. Use Upsert to replace.
-func (c *Collection) Add(id string, vec []float64, data map[string]any) error {
+// Silently skips if the ID already exists. Use Upsert to replace.
+func (c *Collection) Add(id string, vec []float64, data map[string]any) {
 	c.mu.RLock()
 	_, exists := c.idIndex[id]
 	c.mu.RUnlock()
 	if exists {
-		return fmt.Errorf("tqdb: duplicate ID %q (use Upsert to replace)", id)
+		return
 	}
 	cv := c.quantizer.Quantize(vec)
 	c.addCompressed(id, "", cv.Indices, cv.Norm, data)
-	return nil
 }
 
 // AddFloat32 is a convenience wrapper for float32 vectors.
-func (c *Collection) AddFloat32(id string, vec []float32, data map[string]any) error {
-	return c.Add(id, mathutil.Float32ToFloat64(vec), data)
+func (c *Collection) AddFloat32(id string, vec []float32, data map[string]any) {
+	c.Add(id, mathutil.Float32ToFloat64(vec), data)
 }
 
 // AddCompressed stores a pre-compressed vector.
-// Returns an error if the ID already exists.
-func (c *Collection) AddCompressed(id string, cv *tqdb.CompressedVector, data map[string]any) error {
+// Silently skips if the ID already exists.
+func (c *Collection) AddCompressed(id string, cv *tqdb.CompressedVector, data map[string]any) {
 	c.mu.RLock()
 	_, exists := c.idIndex[id]
 	c.mu.RUnlock()
 	if exists {
-		return fmt.Errorf("tqdb: duplicate ID %q", id)
+		return
 	}
 	c.addCompressed(id, "", cv.Indices, cv.Norm, data)
-	return nil
 }
 
 func (c *Collection) addCompressed(id, content string, indices []uint8, norm float32, data map[string]any) {

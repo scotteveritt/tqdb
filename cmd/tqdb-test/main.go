@@ -189,7 +189,7 @@ func main() {
 		for k, v := range doc.Metadata {
 			data[k] = v
 		}
-		_ = coll.Add("", vec, data)
+		coll.Add("", vec, data)
 	}
 
 	// Build filter index on "repo" field
