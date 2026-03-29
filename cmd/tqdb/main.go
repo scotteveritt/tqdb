@@ -181,9 +181,12 @@ func runAdd(args []string) {
 			os.Exit(1)
 		}
 		info := existing.Info()
+		if info.NumVecs > 0 {
+			fmt.Fprintf(os.Stderr, "warning: overwriting %d existing vectors in %s\n", info.NumVecs, path)
+		}
 		_ = existing.Close()
 
-		// Re-create with same config to add vectors.
+		// Re-create with same config. Existing vectors are not preserved.
 		s, err = store.Create(path, tqdb.StoreConfig{
 			Dim:      info.Dim,
 			Bits:     info.Bits,

@@ -1,9 +1,6 @@
 package tqdb
 
-import (
-	"fmt"
-	"strings"
-)
+import "strings"
 
 // Filter is a predicate over document data fields.
 // Matches VS2's MongoDB-style filter operators:
@@ -19,7 +16,8 @@ type eqFilter struct {
 	value any
 }
 
-// Eq returns a filter that matches when field == value (compared as strings via fmt.Sprint).
+// Eq returns a filter that matches when field == value.
+// Supports string, float64, bool, and int types.
 func Eq(field string, value any) Filter {
 	return &eqFilter{field: field, value: value}
 }
@@ -32,7 +30,7 @@ func (f *eqFilter) Match(data map[string]any) bool {
 	if !ok {
 		return false
 	}
-	return fmt.Sprint(v) == fmt.Sprint(f.value)
+	return anyEquals(v, f.value)
 }
 
 type neFilter struct {
@@ -40,7 +38,7 @@ type neFilter struct {
 	value any
 }
 
-// Ne returns a filter that matches when field != value (compared as strings via fmt.Sprint).
+// Ne returns a filter that matches when field != value.
 func Ne(field string, value any) Filter {
 	return &neFilter{field: field, value: value}
 }
@@ -53,7 +51,7 @@ func (f *neFilter) Match(data map[string]any) bool {
 	if !ok {
 		return false
 	}
-	return fmt.Sprint(v) != fmt.Sprint(f.value)
+	return !anyEquals(v, f.value)
 }
 
 // --- Numeric comparison operators ---
@@ -63,7 +61,7 @@ type gtFilter struct {
 	value float64
 }
 
-// Gt returns a filter that matches when field > value (numeric comparison).
+// Gt returns a filter that matches when field > value (numeric).
 func Gt(field string, value float64) Filter {
 	return &gtFilter{field: field, value: value}
 }
@@ -84,7 +82,7 @@ type gteFilter struct {
 	value float64
 }
 
-// Gte returns a filter that matches when field >= value (numeric comparison).
+// Gte returns a filter that matches when field >= value (numeric).
 func Gte(field string, value float64) Filter {
 	return &gteFilter{field: field, value: value}
 }
@@ -105,7 +103,7 @@ type ltFilter struct {
 	value float64
 }
 
-// Lt returns a filter that matches when field < value (numeric comparison).
+// Lt returns a filter that matches when field < value (numeric).
 func Lt(field string, value float64) Filter {
 	return &ltFilter{field: field, value: value}
 }
@@ -126,7 +124,7 @@ type lteFilter struct {
 	value float64
 }
 
-// Lte returns a filter that matches when field <= value (numeric comparison).
+// Lte returns a filter that matches when field <= value (numeric).
 func Lte(field string, value float64) Filter {
 	return &lteFilter{field: field, value: value}
 }
@@ -162,9 +160,8 @@ func (f *inFilter) Match(data map[string]any) bool {
 	if !ok {
 		return false
 	}
-	s := fmt.Sprint(v)
 	for _, candidate := range f.values {
-		if fmt.Sprint(candidate) == s {
+		if anyEquals(v, candidate) {
 			return true
 		}
 	}
@@ -189,9 +186,8 @@ func (f *ninFilter) Match(data map[string]any) bool {
 	if !ok {
 		return false
 	}
-	s := fmt.Sprint(v)
 	for _, candidate := range f.values {
-		if fmt.Sprint(candidate) == s {
+		if anyEquals(v, candidate) {
 			return false
 		}
 	}
@@ -205,7 +201,7 @@ type containsFilter struct {
 	substr string
 }
 
-// Contains returns a filter that matches when the field value contains the substring.
+// Contains returns a filter that matches when the string field value contains the substring.
 func Contains(field, substr string) Filter {
 	return &containsFilter{field: field, substr: substr}
 }
@@ -218,7 +214,11 @@ func (f *containsFilter) Match(data map[string]any) bool {
 	if !ok {
 		return false
 	}
-	return strings.Contains(fmt.Sprint(v), f.substr)
+	s, ok := v.(string)
+	if !ok {
+		return false
+	}
+	return strings.Contains(s, f.substr)
 }
 
 type notContainsFilter struct {
@@ -226,7 +226,7 @@ type notContainsFilter struct {
 	substr string
 }
 
-// NotContains returns a filter that matches when the field value does NOT contain the substring.
+// NotContains returns a filter that matches when the string field value does NOT contain the substring.
 func NotContains(field, substr string) Filter {
 	return &notContainsFilter{field: field, substr: substr}
 }
@@ -239,7 +239,11 @@ func (f *notContainsFilter) Match(data map[string]any) bool {
 	if !ok {
 		return false
 	}
-	return !strings.Contains(fmt.Sprint(v), f.substr)
+	s, ok := v.(string)
+	if !ok {
+		return true // non-string field doesn't contain the substring
+	}
+	return !strings.Contains(s, f.substr)
 }
 
 // --- Logical operators ---
@@ -281,6 +285,34 @@ func (f *orFilter) Match(data map[string]any) bool {
 }
 
 // --- helpers ---
+
+// anyEquals compares two any values without fmt.Sprint.
+// Handles the common types: string, float64, int, bool.
+// Zero allocations on the hot path.
+func anyEquals(a, b any) bool {
+	switch av := a.(type) {
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case float64:
+		bv, ok := toFloat64(b)
+		return ok && av == bv
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	case int:
+		bv, ok := toFloat64(b)
+		return ok && float64(av) == bv
+	default:
+		// Fallback: compare via toFloat64 for numeric types
+		af, aOk := toFloat64(a)
+		bf, bOk := toFloat64(b)
+		if aOk && bOk {
+			return af == bf
+		}
+		return false
+	}
+}
 
 // toFloat64 attempts to coerce a value to float64 for numeric comparisons.
 func toFloat64(v any) (float64, bool) {

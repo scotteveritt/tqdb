@@ -28,9 +28,9 @@ func TestFormatHeaderRoundtrip(t *testing.T) {
 		Seed:      42,
 		NumVecs:   10000,
 		NormsOff:  64 + 10000*4096,
-		CNormsOff: 64 + 10000*4096 + 10000*4,
+		DataOff: 64 + 10000*4096 + 10000*4,
 		IDsOff:    64 + 10000*4096 + 10000*8,
-		MetaOff:   64 + 10000*4096 + 10000*8 + 50000,
+		ContentsOff:   64 + 10000*4096 + 10000*8 + 50000,
 	}
 
 	buf := make([]byte, fileHeaderSize)
@@ -44,8 +44,8 @@ func TestFormatHeaderRoundtrip(t *testing.T) {
 	if decoded.Dim != hdr.Dim || decoded.WorkDim != hdr.WorkDim ||
 		decoded.Bits != hdr.Bits || decoded.Rotation != hdr.Rotation ||
 		decoded.Seed != hdr.Seed || decoded.NumVecs != hdr.NumVecs ||
-		decoded.NormsOff != hdr.NormsOff || decoded.CNormsOff != hdr.CNormsOff ||
-		decoded.IDsOff != hdr.IDsOff || decoded.MetaOff != hdr.MetaOff {
+		decoded.NormsOff != hdr.NormsOff || decoded.DataOff != hdr.DataOff ||
+		decoded.IDsOff != hdr.IDsOff || decoded.ContentsOff != hdr.ContentsOff {
 		t.Errorf("header mismatch:\n  encoded: %+v\n  decoded: %+v", hdr, decoded)
 	}
 }

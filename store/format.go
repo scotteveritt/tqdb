@@ -11,23 +11,34 @@ import (
 // File format constants.
 const (
 	fileMagic      = "TQDB"
-	fileVersion    = uint8(1)
+	fileVersion    = uint8(2)
 	fileHeaderSize = 64
 )
 
+// .tq v2 file layout:
+//
+//	[Header 64B]
+//	[Indices: N × workDim uint8]
+//	[Norms: N × float32 LE]
+//	[IDs: length-prefixed strings]
+//	[Data: length-prefixed JSON blobs (map[string]any)]
+//	[Contents: length-prefixed strings]
+//
+// All offsets in the header are absolute byte positions.
+
 // fileHeader is the in-memory representation of the .tq file header.
 type fileHeader struct {
-	Dim       uint16
-	WorkDim   uint16
-	Bits      uint8
-	Rotation  uint8
-	UseExact  uint8
-	Seed      uint64
-	NumVecs   uint32
-	NormsOff  uint32
-	CNormsOff uint32
-	IDsOff    uint32
-	MetaOff   uint32
+	Dim         uint16
+	WorkDim     uint16
+	Bits        uint8
+	Rotation    uint8
+	UseExact    uint8
+	Seed        uint64
+	NumVecs     uint32
+	NormsOff    uint32
+	IDsOff      uint32
+	DataOff     uint32 // was MetaOff in v1; now stores map[string]any JSON blobs
+	ContentsOff uint32 // NEW in v2: offset of contents section
 }
 
 // encodeHeader writes the 64-byte header to dst.
@@ -43,9 +54,9 @@ func encodeHeader(dst []byte, h *fileHeader) {
 	binary.LittleEndian.PutUint64(dst[12:20], h.Seed)
 	binary.LittleEndian.PutUint32(dst[20:24], h.NumVecs)
 	binary.LittleEndian.PutUint32(dst[24:28], h.NormsOff)
-	binary.LittleEndian.PutUint32(dst[28:32], h.CNormsOff)
-	binary.LittleEndian.PutUint32(dst[32:36], h.IDsOff)
-	binary.LittleEndian.PutUint32(dst[36:40], h.MetaOff)
+	binary.LittleEndian.PutUint32(dst[28:32], h.IDsOff)
+	binary.LittleEndian.PutUint32(dst[32:36], h.DataOff)
+	binary.LittleEndian.PutUint32(dst[36:40], h.ContentsOff)
 	// bytes 40-63: reserved (leave zeroed)
 }
 
@@ -57,21 +68,24 @@ func decodeHeader(src []byte) (fileHeader, error) {
 	if string(src[0:4]) != fileMagic {
 		return fileHeader{}, fmt.Errorf("tqdb: invalid magic %q (expected %q)", src[0:4], fileMagic)
 	}
-	if src[4] != fileVersion {
-		return fileHeader{}, fmt.Errorf("tqdb: unsupported version %d (expected %d)", src[4], fileVersion)
+	v := src[4]
+	if v != fileVersion && v != 1 {
+		return fileHeader{}, fmt.Errorf("tqdb: unsupported version %d", v)
 	}
 	h := fileHeader{
-		Dim:       binary.LittleEndian.Uint16(src[5:7]),
-		WorkDim:   binary.LittleEndian.Uint16(src[7:9]),
-		Bits:      src[9],
-		Rotation:  src[10],
-		UseExact:  src[11],
-		Seed:      binary.LittleEndian.Uint64(src[12:20]),
-		NumVecs:   binary.LittleEndian.Uint32(src[20:24]),
-		NormsOff:  binary.LittleEndian.Uint32(src[24:28]),
-		CNormsOff: binary.LittleEndian.Uint32(src[28:32]),
-		IDsOff:    binary.LittleEndian.Uint32(src[32:36]),
-		MetaOff:   binary.LittleEndian.Uint32(src[36:40]),
+		Dim:      binary.LittleEndian.Uint16(src[5:7]),
+		WorkDim:  binary.LittleEndian.Uint16(src[7:9]),
+		Bits:     src[9],
+		Rotation: src[10],
+		UseExact: src[11],
+		Seed:     binary.LittleEndian.Uint64(src[12:20]),
+		NumVecs:  binary.LittleEndian.Uint32(src[20:24]),
+		NormsOff: binary.LittleEndian.Uint32(src[24:28]),
+		IDsOff:   binary.LittleEndian.Uint32(src[28:32]),
+		DataOff:  binary.LittleEndian.Uint32(src[32:36]),
+	}
+	if v >= 2 {
+		h.ContentsOff = binary.LittleEndian.Uint32(src[36:40])
 	}
 	if h.WorkDim < h.Dim {
 		return fileHeader{}, fmt.Errorf("tqdb: workDim %d < dim %d", h.WorkDim, h.Dim)
@@ -79,7 +93,7 @@ func decodeHeader(src []byte) (fileHeader, error) {
 	return h, nil
 }
 
-// encodeFile serializes the complete .tq file into a byte slice.
+// encodeFile serializes the complete .tq v2 file into a byte slice.
 func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 	numVecs := len(buf.norms)
 	wdim := workDim
@@ -91,23 +105,30 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 	normsOff := uint32(fileHeaderSize + indicesSize)
 	idsOff := normsOff + uint32(normsSize)
 
-	// Compute IDs section size.
+	// IDs section size.
 	idsSize := 0
 	for _, id := range buf.ids {
-		idsSize += 2 + len(id) // uint16 len + bytes
+		idsSize += 2 + len(id)
 	}
-	metaOff := idsOff + uint32(idsSize)
+	dataOff := idsOff + uint32(idsSize)
 
-	// Compute metadata section size.
-	metaSize := 0
-	for _, m := range buf.metadata {
-		metaSize += 4 // uint32 len
+	// Data section size (JSON blobs).
+	dataSize := 0
+	for _, m := range buf.data {
+		dataSize += 4
 		if m != nil {
-			metaSize += len(m) // raw JSON bytes
+			dataSize += len(m)
 		}
 	}
+	contentsOff := dataOff + uint32(dataSize)
 
-	totalSize := int(metaOff) + metaSize
+	// Contents section size.
+	contentsSize := 0
+	for _, c := range buf.contents {
+		contentsSize += 4 + len(c)
+	}
+
+	totalSize := int(contentsOff) + contentsSize
 	data := make([]byte, totalSize)
 
 	// Header.
@@ -116,17 +137,17 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 		useExact = 1
 	}
 	hdr := &fileHeader{
-		Dim:       uint16(cfg.Dim),
-		WorkDim:   uint16(wdim),
-		Bits:      uint8(cfg.Bits),
-		Rotation:  uint8(cfg.Rotation),
-		UseExact:  useExact,
-		Seed:      cfg.Seed,
-		NumVecs:   uint32(numVecs),
-		NormsOff:  normsOff,
-		CNormsOff: normsOff, // deprecated: no longer used, kept for format compat
-		IDsOff:    idsOff,
-		MetaOff:   metaOff,
+		Dim:         uint16(cfg.Dim),
+		WorkDim:     uint16(wdim),
+		Bits:        uint8(cfg.Bits),
+		Rotation:    uint8(cfg.Rotation),
+		UseExact:    useExact,
+		Seed:        cfg.Seed,
+		NumVecs:     uint32(numVecs),
+		NormsOff:    normsOff,
+		IDsOff:      idsOff,
+		DataOff:     dataOff,
+		ContentsOff: contentsOff,
 	}
 	encodeHeader(data[:fileHeaderSize], hdr)
 
@@ -148,9 +169,9 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 		off += 2 + len(id)
 	}
 
-	// Metadata section.
-	off = int(metaOff)
-	for _, m := range buf.metadata {
+	// Data section (JSON blobs).
+	off = int(dataOff)
+	for _, m := range buf.data {
 		if m == nil {
 			binary.LittleEndian.PutUint32(data[off:off+4], 0)
 			off += 4
@@ -159,6 +180,14 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 			copy(data[off+4:], m)
 			off += 4 + len(m)
 		}
+	}
+
+	// Contents section.
+	off = int(contentsOff)
+	for _, c := range buf.contents {
+		binary.LittleEndian.PutUint32(data[off:off+4], uint32(len(c)))
+		copy(data[off+4:], c)
+		off += 4 + len(c)
 	}
 
 	return data
@@ -185,8 +214,8 @@ func decodeIDs(src []byte, n int) []string {
 	return ids
 }
 
-// decodeMetadata reads length-prefixed JSON blobs from a byte slice.
-func decodeMetadataRaw(src []byte, n int) [][]byte {
+// decodeDataRaw reads length-prefixed JSON blobs from a byte slice.
+func decodeDataRaw(src []byte, n int) [][]byte {
 	meta := make([][]byte, n)
 	off := 0
 	for i := range n {
@@ -197,4 +226,18 @@ func decodeMetadataRaw(src []byte, n int) [][]byte {
 		off += 4 + metaLen
 	}
 	return meta
+}
+
+// decodeContents reads length-prefixed strings from a byte slice.
+func decodeContents(src []byte, n int) []string {
+	contents := make([]string, n)
+	off := 0
+	for i := range n {
+		cLen := int(binary.LittleEndian.Uint32(src[off : off+4]))
+		if cLen > 0 {
+			contents[i] = string(src[off+4 : off+4+cLen])
+		}
+		off += 4 + cLen
+	}
+	return contents
 }

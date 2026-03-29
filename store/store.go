@@ -44,9 +44,10 @@ type Store struct {
 	header     fileHeader // cached for lazy loading
 
 	// Lazy-loaded via sync.Once on first Search result access.
-	idsOnce sync.Once
-	ids     []string
-	metaRaw [][]byte // raw JSON blobs
+	idsOnce  sync.Once
+	ids      []string
+	dataRaw  [][]byte // raw JSON blobs
+	contents []string // document content
 }
 
 // writeBuffer accumulates vectors before flushing to disk.
@@ -54,7 +55,8 @@ type writeBuffer struct {
 	allIndices []uint8
 	norms      []float32
 	ids        []string
-	metadata   [][]byte // raw JSON bytes per vector
+	data       [][]byte  // raw JSON bytes per vector (map[string]any)
+	contents   []string  // document content per vector
 }
 
 // Create creates a new store for writing. Call Add() to insert vectors,
@@ -103,7 +105,8 @@ func (s *Store) Add(id string, vec []float64, data map[string]any) error {
 	s.buf.allIndices = append(s.buf.allIndices, cv.Indices...)
 	s.buf.norms = append(s.buf.norms, cv.Norm)
 	s.buf.ids = append(s.buf.ids, id)
-	s.buf.metadata = append(s.buf.metadata, metaJSON)
+	s.buf.data = append(s.buf.data, metaJSON)
+	s.buf.contents = append(s.buf.contents, "")
 
 	return nil
 }
@@ -238,21 +241,24 @@ func Open(path string) (*Store, error) {
 	}, nil
 }
 
-// ensureIDsLoaded lazily parses the IDs and metadata sections.
+// ensureIDsLoaded lazily parses the IDs, data, and contents sections.
 // Safe for concurrent calls via sync.Once.
 func (s *Store) ensureIDsLoaded() {
 	s.idsOnce.Do(func() {
 		s.ids = decodeIDs(s.data[s.header.IDsOff:], s.numVecs)
-		s.metaRaw = decodeMetadataRaw(s.data[s.header.MetaOff:], s.numVecs)
+		s.dataRaw = decodeDataRaw(s.data[s.header.DataOff:], s.numVecs)
+		if s.header.ContentsOff > 0 && int(s.header.ContentsOff) < len(s.data) {
+			s.contents = decodeContents(s.data[s.header.ContentsOff:], s.numVecs)
+		}
 	})
 }
 
 func (s *Store) dataAt(i int) map[string]any {
-	if s.metaRaw[i] == nil {
+	if s.dataRaw[i] == nil {
 		return nil
 	}
 	var m map[string]any
-	_ = json.Unmarshal(s.metaRaw[i], &m)
+	_ = json.Unmarshal(s.dataRaw[i], &m)
 	return m
 }
 
@@ -415,10 +421,15 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 
 	results := make([]tqdb.Result, len(topBuf))
 	for i, sc := range topBuf {
+		var content string
+		if s.contents != nil && sc.idx < len(s.contents) {
+			content = s.contents[sc.idx]
+		}
 		results[i] = tqdb.Result{
-			ID:    s.ids[sc.idx],
-			Score: sc.score,
-			Data:  s.dataAt(sc.idx),
+			ID:      s.ids[sc.idx],
+			Score:   sc.score,
+			Content: content,
+			Data:    s.dataAt(sc.idx),
 		}
 	}
 
