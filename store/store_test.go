@@ -291,7 +291,7 @@ func TestStoreMatchesCollection(t *testing.T) {
 
 	rng := rand.New(rand.NewPCG(111, 0))
 	d := 64
-	n := 200
+	n := 50 // keep below IVF threshold (100) for exact match comparison
 
 	cfg := tqdb.StoreConfig{Dim: d, Bits: 4, Rotation: tqdb.RotationHadamard, Seed: 42}
 

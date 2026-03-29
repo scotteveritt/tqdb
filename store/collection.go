@@ -549,8 +549,11 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 	c.quantizer.Rotation().Rotate(queryRotated, unitQuery[:c.quantizer.GetConfig().Dim])
 	c.quantizer.PutBuf(unitQuery)
 
-	// Top-k via sorted-insert (with extra capacity for offset).
+	// Top-k via sorted-insert (with extra capacity for offset + rescore).
 	effectiveK := topK + opts.Offset
+	if opts.Rescore > 0 && opts.Rescore > effectiveK {
+		effectiveK = opts.Rescore
+	}
 	type scored struct {
 		idx   int
 		score float64
@@ -651,6 +654,24 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 	}
 
 	c.quantizer.PutBuf(queryRotated)
+
+	// Rescore: dequantize top candidates and re-rank with exact cosine similarity.
+	if opts.Rescore > 0 && len(topBuf) > 0 {
+		allIdx := c.allIndices
+		for k := range topBuf {
+			cv := &tqdb.CompressedVector{
+				Dim:     c.quantizer.GetConfig().Dim,
+				Bits:    c.quantizer.GetConfig().Bits,
+				Norm:    c.norms[topBuf[k].idx],
+				Indices: allIdx[topBuf[k].idx*d : topBuf[k].idx*d+d],
+			}
+			recon := c.quantizer.Dequantize(cv)
+			topBuf[k].score = mathutil.CosineSimilarity(query, recon)
+		}
+		sort.Slice(topBuf, func(i, j int) bool {
+			return topBuf[i].score > topBuf[j].score
+		})
+	}
 
 	// Apply offset: skip the first opts.Offset results.
 	if opts.Offset > 0 && opts.Offset < len(topBuf) {

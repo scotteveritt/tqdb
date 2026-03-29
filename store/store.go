@@ -53,6 +53,10 @@ type Store struct {
 	// Parsed data cache for filter-heavy searches (avoids repeated json.Unmarshal).
 	dataCacheOnce sync.Once
 	dataCache     []map[string]any
+
+	// IVF index (built lazily on first indexed search).
+	ivfOnce sync.Once
+	ivfIdx  *ivfIndex
 }
 
 // writeBuffer accumulates vectors before flushing to disk.
@@ -289,6 +293,33 @@ func (s *Store) ensureIDsLoaded() {
 	})
 }
 
+// ensureIVF builds the IVF index lazily on first search (if >= 100 vectors).
+func (s *Store) ensureIVF() {
+	s.ivfOnce.Do(func() {
+		if s.numVecs < 100 {
+			return
+		}
+		numPartitions := int(math.Sqrt(float64(s.numVecs)))
+		if numPartitions < 4 {
+			numPartitions = 4
+		}
+		nProbe := int(math.Sqrt(float64(numPartitions)))
+		if nProbe < 1 {
+			nProbe = 1
+		}
+		noDeleted := make([]bool, s.numVecs) // Store has no deletes
+		s.ivfIdx = buildIVF(
+			s.allIndices,
+			s.quantizer.Codebook().Centroids,
+			s.workDim,
+			s.numVecs,
+			numPartitions,
+			nProbe,
+			noDeleted,
+		)
+	})
+}
+
 // ensureDataCached parses all JSON data blobs once for efficient filtered searches.
 func (s *Store) ensureDataCached() {
 	s.dataCacheOnce.Do(func() {
@@ -369,6 +400,9 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 		return nil
 	}
 
+	// Build IVF lazily on first search.
+	s.ensureIVF()
+
 	// If filter is set, parse all data blobs once up front.
 	if opts.Filter != nil {
 		s.ensureDataCached()
@@ -392,7 +426,11 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 	s.quantizer.Rotation().Rotate(queryRotated, unitQuery[:s.quantizer.GetConfig().Dim])
 	s.quantizer.PutBuf(unitQuery)
 
+	// Determine effective K (account for offset and rescore).
 	effectiveK := opts.TopK + opts.Offset
+	if opts.Rescore > 0 && opts.Rescore > effectiveK {
+		effectiveK = opts.Rescore
+	}
 
 	type scored struct {
 		idx   int
@@ -403,17 +441,19 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 
 	allIdx := s.allIndices
 
-	for i := range n {
-		// Apply data field filter before scoring.
-		if opts.Filter != nil {
-			if !opts.Filter.Match(s.dataCache[i]) {
-				continue
-			}
+	// Build candidate set from IVF + filter.
+	var candidates map[int]struct{}
+	if s.ivfIdx != nil {
+		topPartitions := s.ivfIdx.findNearestPartitions(queryRotated)
+		candidates = s.ivfIdx.candidatesFromPartitions(topPartitions)
+	}
+
+	scoreVec := func(i int) {
+		if opts.Filter != nil && !opts.Filter.Match(s.dataCache[i]) {
+			return
 		}
 
-		// Inner product: <Pi*q_hat, centroids[idx]>
 		indices := allIdx[i*d : i*d+d : i*d+d]
-
 		var dot float64
 		j := 0
 		for ; j <= d-4; j += 4 {
@@ -427,13 +467,11 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 			dot += queryRotated[j] * centroids[indices[j]]
 		}
 
-		// Apply MinScore after scoring.
 		if opts.MinScore > 0 && dot < opts.MinScore {
-			continue
+			return
 		}
-
 		if len(topBuf) >= effectiveK && dot <= minScore {
-			continue
+			return
 		}
 
 		pos := sort.Search(len(topBuf), func(p int) bool {
@@ -451,7 +489,34 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 		}
 	}
 
+	if candidates != nil {
+		for i := range candidates {
+			scoreVec(i)
+		}
+	} else {
+		for i := range n {
+			scoreVec(i)
+		}
+	}
+
 	s.quantizer.PutBuf(queryRotated)
+
+	// Rescore: dequantize top candidates and re-rank with exact cosine similarity.
+	if opts.Rescore > 0 && len(topBuf) > 0 {
+		for k := range topBuf {
+			cv := &tqdb.CompressedVector{
+				Dim:     s.quantizer.GetConfig().Dim,
+				Bits:    s.quantizer.GetConfig().Bits,
+				Norm:    s.norms[topBuf[k].idx],
+				Indices: allIdx[topBuf[k].idx*d : topBuf[k].idx*d+d],
+			}
+			recon := s.quantizer.Dequantize(cv)
+			topBuf[k].score = mathutil.CosineSimilarity(query, recon)
+		}
+		sort.Slice(topBuf, func(i, j int) bool {
+			return topBuf[i].score > topBuf[j].score
+		})
+	}
 
 	// Apply offset.
 	if opts.Offset > 0 && opts.Offset < len(topBuf) {

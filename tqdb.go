@@ -71,6 +71,7 @@ type SearchOptions struct {
 	MinScore float64 // minimum similarity threshold (0 = no filter)
 	Offset   int     // skip first N results (pagination)
 	Filter   Filter  // data field filter
+	Rescore  int     // rescore top-N with exact dequantized distance (0 = disabled, recommended: 3×TopK)
 }
 
 // QueryOptions controls filter-only retrieval (VS2: QueryDataObjectsRequest).
