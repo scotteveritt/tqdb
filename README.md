@@ -20,6 +20,17 @@ tqdb exceeds the TurboQuant paper's reported recall by using Hadamard rotation i
 
 The paper uses 3-bit MSE + 1-bit QJL (TurboQuant_Prod). We benchmarked both and found 4-bit MSE-only with Hadamard rotation outperforms the paper's approach (91.8% vs 89.2% recall@10).
 
+## Why tqdb
+
+No existing system simultaneously satisfies all four:
+
+| Requirement | chromem-go | Weaviate | Milvus | sqlite-vec | coder/hnsw | **tqdb** |
+|-------------|-----------|---------|--------|-----------|-----------|---------|
+| Pure Go (no CGO) | Yes | Yes | No (C++) | No (C) | Yes | **Yes** |
+| Embeddable (in-process) | Yes | **No** (server) | **No** | Yes | Yes | **Yes** |
+| ANN indexing | **No** | Yes | Yes | **No** | Yes | **Yes** |
+| Built-in quantization | **No** | Yes | Yes | int8 only | **No** | **Yes** (4-bit) |
+
 ## What tqdb does
 
 - **Vector store** — `.tq` file, mmap, ScaNN-style IVF index, VS2-aligned filters
