@@ -21,3 +21,7 @@ docs/
 
 # Claude worktrees
 .claude/
+
+# Benchmark datasets (downloaded, not committed)
+bench/datasets/
+bench/results/
