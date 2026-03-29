@@ -34,12 +34,12 @@ func TestCollectionNeedleInHaystack(t *testing.T) {
 			// Add haystack
 			for i := range tc.haystackSize {
 				vec := randomVector(tc.d, rng)
-				coll.Add(fmt.Sprintf("hay-%d", i), vec, nil)
+				_ = coll.Add(fmt.Sprintf("hay-%d", i), vec, nil)
 			}
 
 			// Add needle
 			needle := randomVector(tc.d, rng)
-			coll.Add("needle", needle, nil)
+			_ = coll.Add("needle", needle, nil)
 
 			// Search
 			results := coll.Search(needle, 5)
@@ -72,7 +72,7 @@ func TestCollectionSearchQuality(t *testing.T) {
 	vectors := make([][]float64, n)
 	for i := range n {
 		vectors[i] = randomVector(d, rng)
-		coll.Add(fmt.Sprintf("doc-%d", i), vectors[i], nil)
+		_ = coll.Add(fmt.Sprintf("doc-%d", i), vectors[i], nil)
 	}
 
 	// Search with first vector as query
@@ -103,7 +103,7 @@ func TestCollectionWithFilter(t *testing.T) {
 		if i%2 == 0 {
 			repo = "repo-b"
 		}
-		coll.Add(fmt.Sprintf("doc-%d", i), vec, map[string]any{"repo": repo})
+		_ = coll.Add(fmt.Sprintf("doc-%d", i), vec, map[string]any{"repo": repo})
 	}
 
 	query := randomVector(d, rng)
@@ -128,8 +128,8 @@ func TestCollectionLen(t *testing.T) {
 	}
 
 	rng := rand.New(rand.NewPCG(800, 0))
-	for range 10 {
-		coll.Add("x", randomVector(64, rng), nil)
+	for i := range 10 {
+		_ = coll.Add(fmt.Sprintf("x-%d", i), randomVector(64, rng), nil)
 	}
 	if coll.Len() != 10 {
 		t.Errorf("Len=%d, want 10", coll.Len())
@@ -140,7 +140,7 @@ func TestCollectionAddFloat32(t *testing.T) {
 	coll, _ := NewCollection(tqdb.Config{Dim: 4, Bits: 4, Seed: 42})
 
 	vec32 := []float32{1.0, 2.0, 3.0, 4.0}
-	coll.AddFloat32("test", vec32, nil)
+	_ = coll.AddFloat32("test", vec32, nil)
 
 	query := mathutil.Float32ToFloat64(vec32)
 	results := coll.Search(query, 1)
@@ -227,7 +227,7 @@ func TestCollectionGetByID(t *testing.T) {
 	coll, _ := NewCollection(tqdb.Config{Dim: 64, Bits: 4, Seed: 42})
 	rng := rand.New(rand.NewPCG(902, 0))
 
-	coll.Add("a", randomVector(64, rng), map[string]any{"key": "val"})
+		_ = coll.Add("a", randomVector(64, rng), map[string]any{"key": "val"})
 
 	doc, ok := coll.GetByID("a")
 	if !ok {
@@ -251,7 +251,7 @@ func TestCollectionDelete(t *testing.T) {
 	rng := rand.New(rand.NewPCG(903, 0))
 
 	for i := range 5 {
-		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(64, rng), nil)
+		_ = coll.Add(fmt.Sprintf("doc-%d", i), randomVector(64, rng), nil)
 	}
 
 	if coll.Count() != 5 {
@@ -351,7 +351,7 @@ func TestCollectionListIDs(t *testing.T) {
 	rng := rand.New(rand.NewPCG(906, 0))
 
 	for i := range 5 {
-		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(64, rng), nil)
+		_ = coll.Add(fmt.Sprintf("doc-%d", i), randomVector(64, rng), nil)
 	}
 	_ = coll.Delete("doc-2")
 
@@ -380,7 +380,7 @@ func TestCollectionSearchWithOptions(t *testing.T) {
 		if i%2 == 0 {
 			repo = "repo-b"
 		}
-		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), map[string]any{"repo": repo})
+		_ = coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), map[string]any{"repo": repo})
 	}
 
 	query := randomVector(d, rng)
@@ -469,7 +469,7 @@ func TestCollectionQuery(t *testing.T) {
 		if i%3 == 0 {
 			lang = "python"
 		}
-		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), map[string]any{"lang": lang})
+		_ = coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), map[string]any{"lang": lang})
 	}
 
 	results := coll.Query(tqdb.QueryOptions{
@@ -495,7 +495,7 @@ func TestCollectionMinScore(t *testing.T) {
 	coll, _ := NewCollection(tqdb.Config{Dim: d, Bits: 4, Seed: 42})
 
 	for i := range 100 {
-		coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), nil)
+		_ = coll.Add(fmt.Sprintf("doc-%d", i), randomVector(d, rng), nil)
 	}
 
 	query := randomVector(d, rng)
@@ -521,10 +521,10 @@ func TestCollectionDeletedExcludedFromSearch(t *testing.T) {
 
 	// Add a needle that's very similar to our query.
 	needle := randomVector(d, rng)
-	coll.Add("needle", needle, nil)
+	_ = coll.Add("needle", needle, nil)
 
 	for i := range 50 {
-		coll.Add(fmt.Sprintf("hay-%d", i), randomVector(d, rng), nil)
+		_ = coll.Add(fmt.Sprintf("hay-%d", i), randomVector(d, rng), nil)
 	}
 
 	// Verify needle is top-1 before deletion.

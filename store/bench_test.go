@@ -15,7 +15,7 @@ func BenchmarkCollectionSearch(b *testing.B) {
 			rng := rand.New(rand.NewPCG(42, 0))
 			coll, _ := NewCollection(tqdb.Config{Dim: 128, Bits: 4, Seed: 42})
 			for i := range n {
-				coll.Add(fmt.Sprintf("doc-%d", i), randomVector(128, rng), nil)
+				_ = coll.Add(fmt.Sprintf("doc-%d", i), randomVector(128, rng), nil)
 			}
 			query := randomVector(128, rng)
 			b.ResetTimer()
@@ -33,7 +33,7 @@ func BenchmarkCollectionSearchHadamard(b *testing.B) {
 			rng := rand.New(rand.NewPCG(42, 0))
 			coll, _ := NewCollection(tqdb.Config{Dim: 128, Bits: 4, Seed: 42, Rotation: tqdb.RotationHadamard})
 			for i := range n {
-				coll.Add(fmt.Sprintf("doc-%d", i), randomVector(128, rng), nil)
+				_ = coll.Add(fmt.Sprintf("doc-%d", i), randomVector(128, rng), nil)
 			}
 			query := randomVector(128, rng)
 			b.ResetTimer()

@@ -87,7 +87,7 @@ func main() {
 			Dim: dim, Bits: 4, Rotation: tqdb.RotationHadamard,
 		})
 		for _, d := range docs {
-			coll.Add(d.ID, mathutil.Float32ToFloat64(d.Embedding), nil)
+			_ = coll.Add(d.ID, mathutil.Float32ToFloat64(d.Embedding), nil)
 		}
 
 		if ci == 0 {

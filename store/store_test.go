@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -302,8 +303,8 @@ func TestStoreMatchesCollection(t *testing.T) {
 	vecs := make([][]float64, n)
 	for i := range n {
 		vecs[i] = randomVector(d, rng)
-		id := "v" + string(rune('A'+i%26))
-		coll.Add(id, vecs[i], nil)
+		id := fmt.Sprintf("v%d", i)
+		_ = coll.Add(id, vecs[i], nil)
 		_ = s.Add(id, vecs[i], nil)
 	}
 	_ = s.Close()
