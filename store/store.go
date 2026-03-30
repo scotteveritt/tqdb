@@ -395,7 +395,7 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 	}
 
 	d := s.workDim
-	centroids := s.quantizer.Codebook().Centroids
+	centroids32 := s.quantizer.Codebook().Centroids32
 
 	// Normalize query and rotate.
 	queryNorm := mathutil.Norm(query)
@@ -411,6 +411,12 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 	queryRotated := s.quantizer.GetBuf()
 	s.quantizer.Rotation().Rotate(queryRotated, unitQuery[:s.quantizer.GetConfig().Dim])
 	s.quantizer.PutBuf(unitQuery)
+
+	// Convert rotated query to float32 for scoring.
+	qr32 := make([]float32, d)
+	for i := range d {
+		qr32[i] = float32(queryRotated[i])
+	}
 
 	// Determine effective K (account for offset and rescore).
 	effectiveK := opts.TopK + opts.Offset
@@ -463,22 +469,22 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 		}
 
 		indices := allIdx[i*d : i*d+d : i*d+d]
-		var dot0, dot1 float64
+		var dot0, dot1 float32
 		j := 0
 		for ; j <= d-8; j += 8 {
-			dot0 += queryRotated[j]*centroids[indices[j]] +
-				queryRotated[j+1]*centroids[indices[j+1]] +
-				queryRotated[j+2]*centroids[indices[j+2]] +
-				queryRotated[j+3]*centroids[indices[j+3]]
-			dot1 += queryRotated[j+4]*centroids[indices[j+4]] +
-				queryRotated[j+5]*centroids[indices[j+5]] +
-				queryRotated[j+6]*centroids[indices[j+6]] +
-				queryRotated[j+7]*centroids[indices[j+7]]
+			dot0 += qr32[j]*centroids32[indices[j]] +
+				qr32[j+1]*centroids32[indices[j+1]] +
+				qr32[j+2]*centroids32[indices[j+2]] +
+				qr32[j+3]*centroids32[indices[j+3]]
+			dot1 += qr32[j+4]*centroids32[indices[j+4]] +
+				qr32[j+5]*centroids32[indices[j+5]] +
+				qr32[j+6]*centroids32[indices[j+6]] +
+				qr32[j+7]*centroids32[indices[j+7]]
 		}
 		for ; j < d; j++ {
-			dot0 += queryRotated[j] * centroids[indices[j]]
+			dot0 += qr32[j] * centroids32[indices[j]]
 		}
-		insertTopK(i, dot0+dot1)
+		insertTopK(i, float64(dot0+dot1))
 	}
 
 	if s.ivfIdx != nil {
