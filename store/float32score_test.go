@@ -275,10 +275,3 @@ func benchFloat32Scoring(b *testing.B, n, dim, bits int) {
 	coll.quantizer.PutBuf(queryRotated)
 }
 
-func vecNormF(v []float64) float64 {
-	var s float64
-	for _, x := range v {
-		s += x * x
-	}
-	return math.Sqrt(s)
-}
