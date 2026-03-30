@@ -22,7 +22,9 @@ func TestCollectionForEach(t *testing.T) {
 	}
 
 	// Delete a few.
-	coll.Delete("doc-5", "doc-10", "doc-25")
+	if err := coll.Delete("doc-5", "doc-10", "doc-25"); err != nil {
+		t.Fatal(err)
+	}
 
 	// ForEach should visit exactly 47 entries.
 	var visited int
@@ -159,7 +161,7 @@ func TestStoreAddRawAndForEachCompressed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	if s2.Len() != 20 {
 		t.Fatalf("store len = %d, want 20", s2.Len())
@@ -211,9 +213,13 @@ func TestRoundtripCollectionViaStore(t *testing.T) {
 	storeCfg := tqdb.StoreConfig{Dim: 64, Bits: 4, Rotation: tqdb.RotationHadamard}
 	ws, _ := Create(tqPath, storeCfg)
 	coll1.ForEach(func(id string, indices []uint8, norm float32, content string, data map[string]any) {
-		ws.AddRaw(id, indices, norm, content, data)
+		if err := ws.AddRaw(id, indices, norm, content, data); err != nil {
+			t.Fatal(err)
+		}
 	})
-	ws.Close()
+	if err := ws.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Load: Store -> new Collection.
 	coll2, _ := NewCollection(cfg)
@@ -221,7 +227,9 @@ func TestRoundtripCollectionViaStore(t *testing.T) {
 	rs.ForEachCompressed(func(id string, indices []uint8, norm float32, content string, data map[string]any) {
 		coll2.AddRawDocument(id, indices, norm, content, data)
 	})
-	rs.Close()
+	if err := rs.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Verify counts match.
 	if coll2.Count() != coll1.Count() {

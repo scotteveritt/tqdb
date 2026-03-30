@@ -637,11 +637,13 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 		filterCands = c.filterCandidates(opts.Filter)
 	}
 
-	if c.ivfIdx != nil {
-		// IVF path: iterate partitions directly — no map allocation.
+	switch {
+	case c.ivfIdx != nil:
+		// IVF path: iterate partitions directly, no map allocation.
 		topPartitions := c.ivfIdx.findNearestPartitions(queryRotated, c.ivfIdx.scoreBuf)
 
-		if filterCands != nil {
+		switch {
+		case filterCands != nil:
 			// IVF + filter: intersect by checking filter membership.
 			c.ivfIdx.forEachCandidate(topPartitions, func(i int) {
 				if deleted[i] {
@@ -652,7 +654,7 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 				}
 				scoreAndInsert(i)
 			})
-		} else if filterFn != nil {
+		case filterFn != nil:
 			// IVF + brute-force filter (no inverted index for this filter).
 			c.ivfIdx.forEachCandidate(topPartitions, func(i int) {
 				if deleted[i] {
@@ -663,7 +665,7 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 				}
 				scoreAndInsert(i)
 			})
-		} else {
+		default:
 			// IVF only, no filter.
 			c.ivfIdx.forEachCandidate(topPartitions, func(i int) {
 				if deleted[i] {
@@ -672,7 +674,7 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 				scoreAndInsert(i)
 			})
 		}
-	} else if filterCands != nil {
+	case filterCands != nil:
 		// Filter-only path (no IVF).
 		for i := range filterCands {
 			if deleted[i] {
@@ -680,7 +682,7 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 			}
 			scoreAndInsert(i)
 		}
-	} else {
+	default:
 		// Brute-force path: score all vectors.
 		for i := range n {
 			if deleted[i] {
