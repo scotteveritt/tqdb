@@ -44,6 +44,7 @@ type Collection struct {
 	// Indexes (built by CreateIndex, nil until then).
 	filterIdx *filterIndex
 	ivfIdx    *ivfIndex
+	hnswIdx   *hnswIndex
 }
 
 // filterIndex provides O(1) lookup for Eq/In filter operations.
@@ -350,33 +351,65 @@ func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 		c.filterIdx = idx
 	}
 
-	// Build IVF partitions (ScaNN-style k-means over rotated centroids).
-	// Skip for very small collections, or when explicitly disabled.
-	if n >= 100 && !cfg.SkipIVF {
-		numPartitions := cfg.NumPartitions
-		if numPartitions <= 0 {
-			numPartitions = int(math.Sqrt(float64(n)))
-			if numPartitions < 4 {
-				numPartitions = 4
+	// Build ANN index.
+	switch cfg.Type {
+	case tqdb.IndexHNSW:
+		// HNSW graph index over quantized vectors.
+		centroids32 := c.quantizer.Codebook().Centroids32
+		d := c.dim
+		allIdx := c.allIndices
+
+		distFunc := func(a, b int) float32 {
+			idxA := allIdx[a*d : a*d+d]
+			idxB := allIdx[b*d : b*d+d]
+			var dot float32
+			for j := range d {
+				dot += centroids32[idxA[j]] * centroids32[idxB[j]]
 			}
-		}
-		nProbe := cfg.NProbe
-		if nProbe <= 0 {
-			nProbe = int(math.Sqrt(float64(numPartitions)))
-			if nProbe < 1 {
-				nProbe = 1
-			}
+			return -dot // negative inner product: lower = more similar
 		}
 
-		c.ivfIdx = buildIVF(
-			c.allIndices,
-			c.quantizer.Codebook().Centroids,
-			c.dim,
-			n,
-			numPartitions,
-			nProbe,
-			c.deleted,
-		)
+		h := newHNSW(hnswConfig{
+			M:              cfg.M,
+			EfConstruction: cfg.EfConstruction,
+		})
+		for i := range n {
+			if c.deleted[i] {
+				continue
+			}
+			h.Insert(i, distFunc)
+		}
+		c.hnswIdx = h
+
+	default:
+		// IVF partitions (ScaNN-style k-means over rotated centroids).
+		// Skip for very small collections, or when explicitly disabled.
+		if n >= 100 && !cfg.SkipIVF {
+			numPartitions := cfg.NumPartitions
+			if numPartitions <= 0 {
+				numPartitions = int(math.Sqrt(float64(n)))
+				if numPartitions < 4 {
+					numPartitions = 4
+				}
+			}
+			nProbe := cfg.NProbe
+			if nProbe <= 0 {
+				nProbe = int(math.Sqrt(float64(numPartitions)))
+				if nProbe < 1 {
+					nProbe = 1
+				}
+			}
+
+			c.ivfIdx = buildIVF(
+				c.allIndices,
+				c.quantizer.Codebook().Centroids,
+				c.dim,
+				n,
+				numPartitions,
+				nProbe,
+				c.deleted,
+			)
+		}
 	}
 }
 
@@ -644,6 +677,44 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 	}
 
 	switch {
+	case c.hnswIdx != nil:
+		// HNSW path: graph-based search.
+		ef := opts.Ef
+		if ef <= 0 {
+			ef = effectiveK * 10 // default: 10x topK for quantized asymmetric scoring
+			if ef < 100 {
+				ef = 100
+			}
+		}
+
+		distToQuery := func(nodeID int) float32 {
+			idx := allIdx[nodeID*d : nodeID*d+d]
+			var dot float32
+			for j := range d {
+				dot += qr32[j] * centroids32[idx[j]]
+			}
+			return -dot // negative: HNSW minimizes distance
+		}
+
+		hnswResults := c.hnswIdx.Search(distToQuery, effectiveK, ef)
+
+		// Convert HNSW results to topBuf.
+		for _, r := range hnswResults {
+			i := int(r.id)
+			if deleted[i] {
+				continue
+			}
+			// Apply filter if set.
+			if filterCands != nil {
+				if _, ok := filterCands[i]; !ok {
+					continue
+				}
+			} else if filterFn != nil && !filterFn(c.dataFields[i]) {
+				continue
+			}
+			insertTopK(i, float64(-r.dist)) // convert back to positive score
+		}
+
 	case c.ivfIdx != nil:
 		// IVF path: iterate partitions directly, no map allocation.
 		topPartitions := c.ivfIdx.findNearestPartitions(queryRotated, c.ivfIdx.scoreBuf)
