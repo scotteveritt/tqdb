@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/scotteveritt/tqdb/compare/v0.2.19...v0.3.0) (2026-03-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* redesign Store.Add to accept Document, add SkipIVF to IndexConfig
+
+### Features
+
+* redesign Store.Add to accept Document, add SkipIVF to IndexConfig ([fc872bc](https://github.com/scotteveritt/tqdb/commit/fc872bccdaf8e1d3d0e628e2886314331fe0745f))
+
 ## [0.2.19](https://github.com/scotteveritt/tqdb/compare/v0.2.18...v0.2.19) (2026-03-30)
 
 
