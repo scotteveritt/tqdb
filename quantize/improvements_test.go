@@ -89,7 +89,7 @@ func TestHypothesis3_BitWidthTradeoff(t *testing.T) {
 
 // measureRecall computes recall@10 using a synthetic dataset.
 // Generates n random unit vectors, quantizes them, searches with nQueries queries.
-func measureRecall(dim, bits int, useExact bool, n, nQueries int) float64 {
+func measureRecall(dim, bits int, useExact bool, n, nQueries int) float64 { //nolint:unparam // nQueries is parameterized for clarity
 	rng := rand.New(rand.NewPCG(42, 0))
 
 	tq, err := NewMSE(tqdb.Config{
