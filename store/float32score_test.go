@@ -2,7 +2,6 @@ package store
 
 import (
 	"fmt"
-	"math"
 	"math/rand/v2"
 	"sort"
 	"testing"
