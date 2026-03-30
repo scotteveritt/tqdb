@@ -351,8 +351,8 @@ func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 	}
 
 	// Build IVF partitions (ScaNN-style k-means over rotated centroids).
-	// Skip for very small collections where brute-force is faster.
-	if n >= 100 {
+	// Skip for very small collections, or when explicitly disabled.
+	if n >= 100 && !cfg.SkipIVF {
 		numPartitions := cfg.NumPartitions
 		if numPartitions <= 0 {
 			numPartitions = int(math.Sqrt(float64(n)))

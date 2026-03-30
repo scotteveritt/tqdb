@@ -19,6 +19,11 @@ func randomVector(d int, rng *rand.Rand) []float64 {
 	return v
 }
 
+// doc is a test helper to build a tqdb.Document for Store.Add.
+func doc(id string, vec []float64, data map[string]any) tqdb.Document {
+	return tqdb.Document{ID: id, Embedding: vec, Data: data}
+}
+
 func TestFormatHeaderRoundtrip(t *testing.T) {
 	hdr := &fileHeader{
 		Dim:       3072,
@@ -75,11 +80,7 @@ func TestStoreCreateFlush(t *testing.T) {
 	for i := range 100 {
 		vec := randomVector(64, rng)
 		meta := map[string]any{"idx": string(rune('0' + i%10))}
-		if err := store.Add(
-			"doc-"+string(rune('A'+i%26)),
-			vec,
-			meta,
-		); err != nil {
+		if err := store.Add(doc("doc-"+string(rune('A'+i%26)), vec, meta)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -147,7 +148,7 @@ func TestStoreRoundtrip(t *testing.T) {
 	vecs := make([][]float64, 500)
 	for i := range 500 {
 		vecs[i] = randomVector(d, rng)
-		_ = s.Add("doc-"+string(rune('A'+i%26))+string(rune('0'+i%10)), vecs[i], nil)
+		_ = s.Add(doc("doc-"+string(rune('A'+i%26))+string(rune('0'+i%10)), vecs[i], nil))
 	}
 	_ = s.Close()
 
@@ -185,16 +186,12 @@ func TestStoreSearchNeedle(t *testing.T) {
 
 	// Add haystack.
 	for i := range 1000 {
-		_ = s.Add(
-			"hay-"+string(rune('0'+i/100))+string(rune('0'+(i/10)%10))+string(rune('0'+i%10)),
-			randomVector(d, rng),
-			nil,
-		)
+		_ = s.Add(doc("hay-"+string(rune('0'+i/100))+string(rune('0'+(i/10)%10))+string(rune('0'+i%10)), randomVector(d, rng), nil))
 	}
 
 	// Add needle.
 	needle := randomVector(d, rng)
-	_ = s.Add("needle", needle, nil)
+	_ = s.Add(doc("needle", needle, nil))
 	_ = s.Close()
 
 	// Reopen and search.
@@ -226,7 +223,7 @@ func TestStoreSearchFilter(t *testing.T) {
 		if i%2 == 0 {
 			repo = "repo-b"
 		}
-		_ = s.Add("doc", randomVector(d, rng), map[string]any{"repo": repo})
+		_ = s.Add(doc("doc", randomVector(d, rng), map[string]any{"repo": repo}))
 	}
 	_ = s.Close()
 
@@ -254,7 +251,7 @@ func TestStoreInfo(t *testing.T) {
 	})
 	rng := rand.New(rand.NewPCG(42, 0))
 	for range 50 {
-		_ = s.Add("x", randomVector(128, rng), nil)
+		_ = s.Add(doc("x", randomVector(128, rng), nil))
 	}
 	_ = s.Close()
 
@@ -305,7 +302,7 @@ func TestStoreMatchesCollection(t *testing.T) {
 		vecs[i] = randomVector(d, rng)
 		id := fmt.Sprintf("v%d", i)
 		coll.Add(id, vecs[i], nil)
-		_ = s.Add(id, vecs[i], nil)
+		_ = s.Add(doc(id, vecs[i], nil))
 	}
 	_ = s.Close()
 
@@ -346,7 +343,7 @@ func TestStoreSearchWithOptions(t *testing.T) {
 		if i%2 == 0 {
 			repo = "repo-b"
 		}
-		_ = s.Add("doc-"+string(rune('A'+i%26)), randomVector(d, rng), map[string]any{"repo": repo})
+		_ = s.Add(doc("doc-"+string(rune('A'+i%26)), randomVector(d, rng), map[string]any{"repo": repo}))
 	}
 	_ = s.Close()
 
@@ -403,7 +400,7 @@ func TestStoreQuery(t *testing.T) {
 		if i%3 == 0 {
 			lang = "python"
 		}
-		_ = s.Add("doc-"+string(rune('A'+i%26)), randomVector(d, rng), map[string]any{"lang": lang})
+		_ = s.Add(doc("doc-"+string(rune('A'+i%26)), randomVector(d, rng), map[string]any{"lang": lang}))
 	}
 	_ = s.Close()
 

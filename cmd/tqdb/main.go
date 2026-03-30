@@ -249,7 +249,7 @@ func runAdd(args []string) {
 		if rec.ID == "" {
 			rec.ID = fmt.Sprintf("vec-%d", count)
 		}
-		if err := s.Add(rec.ID, rec.Vector, rec.Metadata); err != nil {
+		if err := s.Add(tqdb.Document{ID: rec.ID, Embedding: rec.Vector, Data: rec.Metadata}); err != nil {
 			fmt.Fprintf(os.Stderr, "error adding %s: %v\n", rec.ID, err)
 			os.Exit(1)
 		}
@@ -514,7 +514,7 @@ func importChromem(outPath, dir string, bits int, rot tqdb.RotationType, seed ui
 				data[k] = v
 			}
 		}
-		if err := s.Add(doc.ID, vec, data); err != nil {
+		if err := s.Add(tqdb.Document{ID: doc.ID, Content: doc.Content, Embedding: vec, Data: data}); err != nil {
 			skipped++
 			continue
 		}
@@ -596,7 +596,7 @@ func importJSONL(outPath, fromFile string, dim, bits int, rot tqdb.RotationType,
 		if id == "" {
 			id = fmt.Sprintf("vec-%d", imported)
 		}
-		if err := s.Add(id, rec.Vector, rec.Metadata); err != nil {
+		if err := s.Add(tqdb.Document{ID: id, Embedding: rec.Vector, Data: rec.Metadata}); err != nil {
 			skipped++
 			continue
 		}

@@ -25,3 +25,6 @@ docs/
 # Benchmark datasets (downloaded, not committed)
 bench/datasets/
 bench/results/
+scotteveritt.github.io
+store.test
+tqdb-annbench

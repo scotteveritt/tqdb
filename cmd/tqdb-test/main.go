@@ -7,7 +7,6 @@ package main
 
 import (
 	"compress/gzip"
-	"context"
 	"encoding/gob"
 	"fmt"
 	"math"
@@ -74,9 +73,9 @@ func main() {
 		for k, v := range doc.Metadata {
 			data[k] = v
 		}
-		if err := s.AddDocument(context.TODO(), tqdb.Document{
+		if err := s.Add(tqdb.Document{
 			ID:        doc.ID,
-			Content:   doc.Content[:min(200, len(doc.Content))], // truncate for size
+			Content:   doc.Content[:min(200, len(doc.Content))],
 			Data:      data,
 			Embedding: vec,
 		}); err != nil {

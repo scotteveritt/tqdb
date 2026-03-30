@@ -1,7 +1,6 @@
 package store
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -92,69 +91,39 @@ func Create(path string, cfg tqdb.StoreConfig) (*Store, error) {
 	}, nil
 }
 
-// Add quantizes and buffers a vector for later flushing.
+// Add quantizes and buffers a document for later flushing.
 // Only valid in write mode (created via Create).
-func (s *Store) Add(id string, vec []float64, data map[string]any) error {
+// doc.Embedding must be non-nil; Store does not support auto-embedding.
+func (s *Store) Add(doc tqdb.Document) error {
 	if s.mode != modeWrite {
 		return fmt.Errorf("tqdb: Add called on read-only store")
 	}
 
-	cv := s.quantizer.Quantize(vec)
-
-	// Encode data as JSON.
-	var metaJSON []byte
-	if len(data) > 0 {
-		var err error
-		metaJSON, err = json.Marshal(data)
-		if err != nil {
-			return fmt.Errorf("tqdb: marshal data: %w", err)
-		}
-	}
-
-	s.buf.allIndices = append(s.buf.allIndices, cv.Indices...)
-	s.buf.norms = append(s.buf.norms, cv.Norm)
-	s.buf.ids = append(s.buf.ids, id)
-	s.buf.data = append(s.buf.data, metaJSON)
-	s.buf.contents = append(s.buf.contents, "")
-
-	return nil
-}
-
-// AddFloat32 is a convenience wrapper for float32 vectors.
-func (s *Store) AddFloat32(id string, vec []float32, data map[string]any) error {
-	return s.Add(id, mathutil.Float32ToFloat64(vec), data)
-}
-
-// AddDocument quantizes and buffers a Document for later flushing.
-// Only valid in write mode (created via Create).
-// The document must have a non-nil Embedding; Store does not support auto-embedding.
-func (s *Store) AddDocument(_ context.Context, doc tqdb.Document) error {
-	if s.mode != modeWrite {
-		return fmt.Errorf("tqdb: AddDocument called on read-only store")
-	}
-
 	vec := doc.Embedding
 	if len(vec) == 0 {
-		return fmt.Errorf("tqdb: Document.Embedding is required for Store (no EmbedFunc)")
+		return fmt.Errorf("tqdb: Document.Embedding is required for Store")
 	}
 
 	cv := s.quantizer.Quantize(vec)
+	return s.addBuf(doc.ID, doc.Content, cv.Indices, cv.Norm, doc.Data)
+}
 
+// addBuf appends to the write buffer. Shared by Add and AddRaw.
+func (s *Store) addBuf(id, content string, indices []uint8, norm float32, data map[string]any) error {
 	var dataJSON []byte
-	if len(doc.Data) > 0 {
+	if len(data) > 0 {
 		var err error
-		dataJSON, err = json.Marshal(doc.Data)
+		dataJSON, err = json.Marshal(data)
 		if err != nil {
 			return fmt.Errorf("tqdb: marshal data: %w", err)
 		}
 	}
 
-	s.buf.allIndices = append(s.buf.allIndices, cv.Indices...)
-	s.buf.norms = append(s.buf.norms, cv.Norm)
-	s.buf.ids = append(s.buf.ids, doc.ID)
+	s.buf.allIndices = append(s.buf.allIndices, indices...)
+	s.buf.norms = append(s.buf.norms, norm)
+	s.buf.ids = append(s.buf.ids, id)
 	s.buf.data = append(s.buf.data, dataJSON)
-	s.buf.contents = append(s.buf.contents, doc.Content)
-
+	s.buf.contents = append(s.buf.contents, content)
 	return nil
 }
 
@@ -576,22 +545,7 @@ func (s *Store) AddRaw(id string, indices []uint8, norm float32, content string,
 	if s.mode != modeWrite {
 		return fmt.Errorf("tqdb: AddRaw called on read-only store")
 	}
-
-	var dataJSON []byte
-	if len(data) > 0 {
-		var err error
-		dataJSON, err = json.Marshal(data)
-		if err != nil {
-			return fmt.Errorf("tqdb: marshal data: %w", err)
-		}
-	}
-
-	s.buf.allIndices = append(s.buf.allIndices, indices...)
-	s.buf.norms = append(s.buf.norms, norm)
-	s.buf.ids = append(s.buf.ids, id)
-	s.buf.data = append(s.buf.data, dataJSON)
-	s.buf.contents = append(s.buf.contents, content)
-	return nil
+	return s.addBuf(id, content, indices, norm, data)
 }
 
 // Info returns statistics about the store.

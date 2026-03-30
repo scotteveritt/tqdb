@@ -85,6 +85,7 @@ type IndexConfig struct {
 	FilterFields  []string // fields to build inverted indexes on
 	NumPartitions int      // IVF partitions (0 = auto √N)
 	NProbe        int      // partitions to search per query (0 = auto √NumPartitions)
+	SkipIVF       bool     // if true, only build filter indexes (no IVF partitioning)
 }
 
 // CompressedVector is the output of TurboQuantMSE.Quantize().
