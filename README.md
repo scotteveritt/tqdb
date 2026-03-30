@@ -1,51 +1,48 @@
 # tqdb
 
-**The quantization-native vector database.** Embeddable. Single-file. Pure Go.
+**The quantization-native vector database.** Pure Go. Single file. Embeddable.
 
-8x compression. ScaNN-style indexing. Search without decompression. No training data needed.
+Store vectors compressed. Search without decompressing. Open in milliseconds.
 
-Built on Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) with [Hadamard rotation](https://arxiv.org/abs/2404.00456) and IVF partitioning. Exceeds the paper's recall by 7%.
-
-## vs the Paper
-
-tqdb exceeds the TurboQuant paper's reported recall by using Hadamard rotation instead of QR:
-
-| Metric (d=3072, 4-bit) | Paper | tqdb | Delta |
-|------------------------|-------|------|-------|
-| Cosine similarity | ~99.5% | **99.6%** | +0.1% |
-| Recall@10 (brute-force) | ~85% | **91.9%** | **+6.9%** |
-| Recall@10 (IVF indexed) | — | **91.3%** | with 6.8x speedup |
-| Rotation memory (d=3072) | 75 MB (QR) | **65 KB** (Hadamard) | **1,150x less** |
-| Quantize time (d=3072) | 0.002s | **0.86 µs** | per vector |
-
-The paper uses 3-bit MSE + 1-bit QJL (TurboQuant_Prod). We benchmarked both and found 4-bit MSE-only with Hadamard rotation outperforms the paper's approach (91.8% vs 89.2% recall@10).
-
-## Why tqdb
-
-No existing system simultaneously satisfies all four:
-
-| Requirement | chromem-go | Weaviate | Milvus | sqlite-vec | coder/hnsw | **tqdb** |
-|-------------|-----------|---------|--------|-----------|-----------|---------|
-| Pure Go (no CGO) | Yes | Yes | No (C++) | No (C) | Yes | **Yes** |
-| Embeddable (in-process) | Yes | **No** (server) | **No** | Yes | Yes | **Yes** |
-| ANN indexing | **No** | Yes | Yes | **No** | Yes | **Yes** |
-| Built-in quantization | **No** | Yes | Yes | int8 only | **No** | **Yes** (4-bit) |
-
-## What tqdb does
-
-- **Vector store** — `.tq` file, mmap, ScaNN-style IVF index, VS2-aligned filters
-- **Model compression** — SafeTensors → 4-bit (TinyLlama 2.0 GB → 581 MB in 3s)
-- **GGUF conversion** — SafeTensors → GGUF for ollama/llama.cpp/LM Studio
-- **KV cache** — Quantized attention for 2x longer contexts
+Built on Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) with Hadamard rotation and IVF partitioning.
 
 ## Install
 
 ```bash
+# Library
 go get github.com/scotteveritt/tqdb
+
+# CLI
 go install github.com/scotteveritt/tqdb/cmd/tqdb@latest
 ```
 
-## Quick Start
+## CLI Quick Start
+
+```bash
+# Initialize a workspace with an embedding provider
+tqdb init --provider ollama
+
+# Import data (JSONL with vectors, or --embed to auto-embed text)
+tqdb import --from embeddings.jsonl
+
+# Search by text (embeds via configured provider)
+tqdb search "how does authentication work"
+
+# Search with filters
+tqdb search "error handling" --top 5 --filter repo=myrepo --filter language=go
+
+# Inspect
+tqdb info
+tqdb count
+tqdb bench --queries 100
+tqdb export | head -5
+```
+
+The CLI supports three embedding providers (Vertex AI, OpenAI, Ollama) as
+lightweight HTTP clients with no SDK dependencies. Configure once via
+`tqdb init` or `~/.config/tqdb/config.yaml`.
+
+## Go Library
 
 ```go
 import (
@@ -53,137 +50,191 @@ import (
     "github.com/scotteveritt/tqdb/store"
 )
 
-// Create, add, flush
+// Create and populate a .tq file
 s, _ := store.Create("index.tq", tqdb.StoreConfig{
-    Dim: 768, Bits: 4, Rotation: tqdb.RotationHadamard,
+    Dim: 3072, Bits: 8, Rotation: tqdb.RotationHadamard,
 })
-s.AddDocument(ctx, tqdb.Document{
-    ID: "doc-1", Content: "...", Embedding: vec,
-    Data: map[string]any{"repo": "tqdb", "stars": 42},
+s.Add(tqdb.Document{
+    ID: "doc-1", Content: "hello world", Embedding: vec,
+    Data: map[string]any{"repo": "myrepo", "language": "go"},
 })
-s.Close()
+s.Close() // writes the .tq file atomically
 
-// Open (mmap, 10ms), search (5ms with IVF)
+// Open (mmap, instant) and search
 s, _ = store.Open("index.tq")
 defer s.Close()
-
 results := s.SearchWithOptions(query, tqdb.SearchOptions{
     TopK:   10,
-    Filter: tqdb.And(tqdb.Eq("repo", "tqdb"), tqdb.Gt("stars", 10.0)),
+    Filter: tqdb.And(tqdb.Eq("repo", "myrepo"), tqdb.Gt("stars", 10.0)),
 })
 ```
 
-## Indexes (ScaNN-style IVF)
+### In-Memory Collection
+
+For applications that need Add/Delete/Upsert during a session:
 
 ```go
+coll, _ := store.NewCollection(tqdb.Config{
+    Dim: 3072, Bits: 8, Rotation: tqdb.RotationHadamard,
+})
+coll.Add("id", vec, data)
 coll.CreateIndex(tqdb.IndexConfig{
     FilterFields: []string{"repo", "language"},
 })
-// IVF partitions built automatically (√N clusters, k-means)
-// Filter fields get inverted indexes for O(1) lookup
-// Searches use both: partition pruning + filter intersection
+results := coll.Search(query, 10)
 ```
 
-| Search Mode | Without Index | With Index | Speedup |
-|------------|---------------|-----------|---------|
-| Unfiltered (25K, d=3072) | 31ms | **4.6ms** | **6.8x** |
-| Filtered | 12ms | **2.1ms** | **5.7x** |
+## How It Works
 
-## VS2-Aligned Filters
+1. **Normalize** the vector to unit length, store the magnitude separately
+2. **Rotate** via Randomized Walsh-Hadamard Transform (O(d log d), 65 KB memory)
+3. **Quantize** each coordinate with a Lloyd-Max codebook precomputed from the known Gaussian distribution (no training data needed)
+4. **Search** by rotating the query once, then computing inner products via centroid table lookup (no decompression)
 
-Matches [Google Vector Search 2.0](https://docs.cloud.google.com/vertex-ai/docs/vector-search-2/query-search/search) filter syntax:
-
-```go
-tqdb.Eq("repo", "tqdb")                    // $eq
-tqdb.Ne("status", "archived")              // $ne
-tqdb.Gt("stars", 100.0)                    // $gt
-tqdb.In("lang", "go", "rust", "python")    // $in
-tqdb.And(tqdb.Eq("repo", "x"), tqdb.Gt("stars", 50.0))  // $and
-tqdb.Or(tqdb.Eq("lang", "go"), tqdb.Eq("lang", "rust"))  // $or
-tqdb.Contains("content", "vector")          // $contains
-```
-
-## CRUD
-
-```go
-coll.Add("id", vec, data)                       // skip if duplicate
-coll.AddDocument(ctx, doc)                       // auto-embed if EmbedFunc set
-coll.Upsert("id", vec, data)                    // replace if exists
-doc, ok := coll.GetByID("id")
-coll.Delete("id-1", "id-2")
-ids := coll.ListIDs()
-```
-
-## CLI
-
-```bash
-tqdb create index.tq --dim 768 --bits 4 --rotation hadamard
-cat vectors.jsonl | tqdb add index.tq
-tqdb search index.tq --query "0.1,0.2,..." --top 10
-tqdb info index.tq
-tqdb import index.tq --format chromem --dir /path/to/chromem-data
-tqdb compress model.safetensors -o model.tqm --bits 4
-tqdb convert ./model-dir -o model.gguf
-tqdb inspect model.tqm
-```
+The codebook depends only on (dimension, bits), not on your data. This makes quantization data-oblivious: you can add vectors one at a time without retraining.
 
 ## Benchmarks
 
-Measured on Apple M4 Pro with 25K real Gemini embeddings (d=3072).
+All measurements on Apple M4 Pro, 25K Gemini embeddings, d=3072.
+
+### Search Performance
+
+| Mode | Recall@10 | p50 | QPS |
+|------|-----------|-----|-----|
+| Brute-force (8-bit) | ~99% | 2.9ms | 343 |
+| Brute-force (4-bit) | ~89% | 2.9ms | 343 |
+| IVF + rescore | ~92% | 9.4ms | 106 |
 
 ### vs chromem-go
 
 | Metric | chromem-go | tqdb | Improvement |
 |--------|-----------|------|-------------|
-| Open time | 6.2s | **10ms** | **620x** |
-| Search (brute-force) | 72ms | **31ms** | **2.3x** |
-| Search (IVF indexed) | — | **5ms** | **14x** |
-| Disk size | 362 MB | **115 MB** | **3.1x** |
-| Files | 25,411 | **1** | |
-| Recall@10 | 100% (exact) | **91.9%** | 4-bit quantization |
+| Startup | 6.2s | **10ms** | **620x** |
+| Search | 72ms | **2.9ms** | **25x** |
+| Disk | 397 MB (25K files) | **140 MB** (1 file) | **2.8x** |
+| Recall@10 | 100% (exact) | **~99%** (8-bit) | -1% |
 
-### Recall vs Latency
+### Recall by Bit-Width
 
-| Config | Recall@10 | p50 | Speedup |
-|--------|-----------|-----|---------|
-| Brute-force | 91.9% | 31ms | 1.0x |
-| IVF default | 89.1% | 4.7ms | 6.6x |
-| IVF nProbe=2x | 90.7% | 8.5ms | 3.7x |
-| **IVF nProbe=2x + rescore=30** | **91.9%** | **9.4ms** | **3.3x** |
+| Bits | Recall@10 (d=3072) | Recall@10 (d=128) | Bytes/Vector | Compression |
+|------|-------------------|-------------------|-------------|-------------|
+| 3 | 78% | 76% | d * 3/8 | 21x |
+| 4 | 89% | 86% | d * 4/8 | 16x |
+| 5 | 93% | 93% | d * 5/8 | 13x |
+| 6 | 96% | 96% | d * 6/8 | 11x |
+| **8** | **~99%** | **99%** | **d** | **8x** |
 
-### Model Compression (TinyLlama 1.1B)
+Default is 8-bit. With the current uint8 storage format, all bit-widths use the
+same bytes on disk (one byte per coordinate). The compression ratios above apply
+when bit-packing is enabled in the .tq format (4-bit packs 2 indices per byte).
 
-| | Original | Compressed |
-|---|---|---|
-| Size | 2.0 GB (BF16) | **581 MB** (4-bit) |
-| Time | — | **3.1s** (12 cores) |
-| Quality | — | **99.5%** cosine sim |
+### Standard ANN Benchmarks
 
-### Compression Quality
+Tested on canonical datasets from [ann-benchmarks](https://github.com/erikbern/ann-benchmarks):
 
-| Bits | Cosine Similarity | Recall@10 | Ratio |
-|------|-------------------|-----------|-------|
-| 4-bit | 99.6% | **91.9%** | 8x |
-| 5-bit | 99.8% | **92.3%** | 6.4x |
-| 3-bit | 98.3% | ~80% | 10.6x |
+| Dataset | Type | d | N | 4-bit Recall@10 | 8-bit Recall@10 |
+|---------|------|---|---|-----------------|-----------------|
+| Gemini embeddings | Learned | 3072 | 25K | 91.9% | ~99% |
+| GloVe-100 | Learned | 100 | 1.18M | 80.8% | 96.6% |
+| SIFT-128 | SIFT descriptors | 128 | 1M | 50.9% | 89.3% |
+
+4-bit TurboQuant works best on modern learned embeddings (Gemini, GloVe, OpenAI).
+SIFT descriptors have distributional properties that don't match the Gaussian
+codebook assumption, resulting in lower recall at low bit-widths.
+
+## Comparison with TurboQuant Paper
+
+We changed two things relative to the paper's approach, and measured each independently:
+
+| Config | Rotation | Bit Allocation | Recall@10 (d=3072) |
+|--------|----------|---------------|-------------------|
+| Paper | QR | Prod (3+1) | ~85% |
+| tqdb (rotation only) | **Hadamard** | Prod (3+1) | 89.2% |
+| tqdb (both) | **Hadamard** | **MSE-only (4+0)** | **91.9%** |
+
+Hadamard rotation contributes ~4.3% and MSE-only bit allocation ~2.6%.
+Memory: 65 KB (Hadamard) vs 75 MB (QR).
+
+## Features
+
+### Filters
+
+Composable filters matching [Google Vector Search 2.0](https://docs.cloud.google.com/vertex-ai/docs/vector-search-2/query-search/search) syntax:
+
+```go
+tqdb.Eq("repo", "tqdb")                    // exact match
+tqdb.In("lang", "go", "rust", "python")    // set membership
+tqdb.Gt("stars", 100.0)                    // numeric comparison
+tqdb.And(filter1, filter2)                  // intersection
+tqdb.Or(filter1, filter2)                   // union
+tqdb.Contains("content", "vector")          // substring
+```
+
+Fields listed in `IndexConfig.FilterFields` get inverted indexes for O(1) lookup.
+
+### IVF Partitioning
+
+```go
+coll.CreateIndex(tqdb.IndexConfig{
+    FilterFields: []string{"repo", "language"},
+    // IVF auto-tuned: sqrt(N) partitions, sqrt(P) probes
+    // Set SkipIVF: true to build only filter indexes (faster startup)
+})
+```
+
+### File Format
+
+The `.tq` format is a single columnar file, memory-mapped for instant startup:
+
+```
+[Header 64B] [Indices N*packedRow] [Norms N*4B] [IDs] [Data JSON] [Contents]
+```
+
+Indices are bit-packed (4-bit: 2 per byte, 8-bit: 1 per byte). The header
+stores dimension, bits, rotation type, and section offsets. IDs, metadata, and
+content are lazily loaded on first access.
+
+### CRUD Operations
+
+```go
+coll.Add("id", vec, data)                   // skip if duplicate
+coll.AddDocument(ctx, doc)                  // auto-embed if EmbedFunc set
+coll.AddDocuments(ctx, docs, concurrency)   // batch with concurrent embedding
+coll.Upsert("id", vec, data)               // replace if exists
+coll.Delete("id-1", "id-2")
+doc, ok := coll.GetByID("id")
+ids := coll.ListIDs()
+```
+
+### Persistence Roundtrip
+
+```go
+// Save Collection to .tq file
+s, _ := store.Create("index.tq", cfg)
+coll.ForEach(func(id string, indices []uint8, norm float32, content string, data map[string]any) {
+    s.AddRaw(id, indices, norm, content, data)
+})
+s.Close()
+
+// Load .tq file back into Collection
+s, _ = store.Open("index.tq")
+s.ForEachCompressed(func(id string, indices []uint8, norm float32, content string, data map[string]any) {
+    coll.AddRawDocument(id, indices, norm, content, data)
+})
+s.Close()
+```
 
 ## Architecture
 
 ```
-tqdb/           — shared types: Config, Result, Filter, Document
-quantize/       — TurboQuantMSE, Hadamard rotation, Lloyd-Max codebook
-store/          — Collection (in-memory), Store (.tq file, mmap), IVF index
-kvcache/        — quantized KV cache for transformer inference
-model/          — SafeTensors reader, model weight compression
-internal/codec/ — codebook solver, rotation matrices, bit-packing
+tqdb/             shared types: Config, Result, Filter, Document
+store/            Collection (in-memory), Store (.tq file, mmap), IVF index
+quantize/         TurboQuantMSE, asymmetric scoring
+internal/codec/   codebook solver, Hadamard rotation, bit-packing
+internal/embed/   embedding providers: Vertex AI, OpenAI, Ollama
+kvcache/          quantized KV cache for transformer inference
+cmd/tqdb/         CLI (cobra)
 ```
-
-## Algorithm
-
-1. **Rotate** — Randomized Walsh-Hadamard Transform spreads energy uniformly (O(d log d), O(d) memory)
-2. **Quantize** — Per-coordinate Lloyd-Max with precomputed codebook (no training data, data-oblivious)
-3. **Index** — ScaNN-style IVF: k-means partitions + inverted filter indexes
-4. **Search** — Rotate query once, prune partitions, inner product via centroid lookup (no decompression)
 
 ## License
 
