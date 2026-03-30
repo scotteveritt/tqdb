@@ -224,18 +224,6 @@ s.ForEachCompressed(func(id string, indices []uint8, norm float32, content strin
 s.Close()
 ```
 
-## Architecture
-
-```
-tqdb/             shared types: Config, Result, Filter, Document
-store/            Collection (in-memory), Store (.tq file, mmap), IVF index
-quantize/         TurboQuantMSE, asymmetric scoring
-internal/codec/   codebook solver, Hadamard rotation, bit-packing
-internal/embed/   embedding providers: Vertex AI, OpenAI, Ollama
-kvcache/          quantized KV cache for transformer inference
-cmd/tqdb/         CLI (cobra)
-```
-
 ## License
 
 MIT
