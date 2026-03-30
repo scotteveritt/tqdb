@@ -30,6 +30,8 @@ func main() {
 	dir := flag.String("dir", "", "path to dataset directory with train.fvecs, test.fvecs, neighbors.ivecs")
 	output := flag.String("output", "", "write markdown results to file (optional)")
 	topK := flag.Int("k", 10, "recall@k")
+	maxQueries := flag.Int("queries", 0, "max queries to run (0 = all)")
+	maxPartitions := flag.Int("partitions", 0, "max IVF partitions (0 = auto √N)")
 	flag.Parse()
 
 	if *dir == "" {
@@ -50,26 +52,38 @@ func main() {
 	fmt.Printf("  Test:  %d queries\n", len(test))
 	fmt.Printf("  Truth: top-%d neighbors\n\n", len(neighbors[0]))
 
+	// Limit queries if requested.
+	if *maxQueries > 0 && *maxQueries < len(test) {
+		test = test[:*maxQueries]
+		neighbors = neighbors[:*maxQueries]
+	}
+
 	k := *topK
 	warmup := 10
 	if warmup > len(test) {
 		warmup = 0
 	}
 
-	// Configs to benchmark.
-	type benchConfig struct {
+	// Configs to benchmark. IVF configs with the same bits share a single collection build.
+	type searchConfig struct {
 		name    string
-		bits    int
-		ivf     bool
 		rescore int
 	}
-	configs := []benchConfig{
-		{"float64 brute-force (baseline)", 0, false, 0},
-		{"tqdb 4-bit brute-force", 4, false, 0},
-		{"tqdb 4-bit IVF", 4, true, 0},
-		{"tqdb 4-bit IVF + rescore=30", 4, true, 30},
-		{"tqdb 5-bit brute-force", 5, false, 0},
-		{"tqdb 8-bit brute-force", 8, false, 0},
+	type benchGroup struct {
+		bits    int
+		ivf     bool
+		configs []searchConfig
+	}
+
+	groups := []benchGroup{
+		{bits: 0, ivf: false, configs: []searchConfig{{"float64 brute-force (baseline)", 0}}},
+		{bits: 4, ivf: false, configs: []searchConfig{{"tqdb 4-bit brute-force", 0}}},
+		{bits: 4, ivf: true, configs: []searchConfig{
+			{"tqdb 4-bit IVF", 0},
+			{"tqdb 4-bit IVF + rescore=30", 30},
+		}},
+		{bits: 5, ivf: false, configs: []searchConfig{{"tqdb 5-bit brute-force", 0}}},
+		{bits: 8, ivf: false, configs: []searchConfig{{"tqdb 8-bit brute-force", 0}}},
 	}
 
 	type result struct {
@@ -82,17 +96,25 @@ func main() {
 	}
 	var results []result
 
-	for _, cfg := range configs {
-		fmt.Printf("--- %s ---\n", cfg.name)
-
-		if cfg.bits == 0 {
+	for _, g := range groups {
+		if g.bits == 0 {
+			fmt.Printf("--- %s ---\n", g.configs[0].name)
 			r := benchFloat64BruteForce(train, test, neighbors, k, warmup, dim)
-			results = append(results, result{cfg.name, r.recall, r.p50, r.p95, r.qps, r.buildTime})
+			results = append(results, result{g.configs[0].name, r.recall, r.p50, r.p95, r.qps, r.buildTime})
 			continue
 		}
 
-		r := benchTQDB(train, test, neighbors, k, warmup, dim, cfg.bits, cfg.ivf, cfg.rescore)
-		results = append(results, result{cfg.name, r.recall, r.p50, r.p95, r.qps, r.buildTime})
+		// Build collection once for all configs in this group.
+		fmt.Printf("--- Building %d-bit collection (IVF=%v) ---\n", g.bits, g.ivf)
+		coll, buildTime := buildCollection(train, dim, g.bits, g.ivf, *maxPartitions)
+		fmt.Printf("  Built in %s\n", buildTime.Round(time.Millisecond))
+
+		// Run each search config on the shared collection.
+		for _, cfg := range g.configs {
+			fmt.Printf("--- %s ---\n", cfg.name)
+			r := benchSearch(coll, test, neighbors, k, warmup, cfg.rescore)
+			results = append(results, result{cfg.name, r.recall, r.p50, r.p95, r.qps, buildTime})
+		}
 	}
 
 	// Print table.
@@ -138,53 +160,9 @@ type benchResult struct {
 	buildTime time.Duration
 }
 
-func benchFloat64BruteForce(train, test [][]float64, neighbors [][]int32, k, warmup, _ int) benchResult {
-	n := len(train)
-	buildStart := time.Now()
-	// Precompute norms.
-	norms := make([]float64, n)
-	for i, v := range train {
-		norms[i] = vecNorm(v)
-	}
-	buildTime := time.Since(buildStart)
-
-	var latencies []time.Duration
-	var totalRecall float64
-
-	for qi, query := range test {
-		qNorm := vecNorm(query)
-		start := time.Now()
-		type scored struct {
-			idx   int
-			score float64
-		}
-		scores := make([]scored, n)
-		for i, vec := range train {
-			scores[i] = scored{i, vecDot(query, vec) / (qNorm * norms[i])}
-		}
-		sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
-		elapsed := time.Since(start)
-
-		if qi >= warmup {
-			latencies = append(latencies, elapsed)
-			truthSet := make(map[int32]bool, k)
-			for _, idx := range neighbors[qi][:k] {
-				truthSet[idx] = true
-			}
-			hits := 0
-			for _, s := range scores[:k] {
-				if truthSet[int32(s.idx)] {
-					hits++
-				}
-			}
-			totalRecall += float64(hits) / float64(k)
-		}
-	}
-
-	return computeStats(latencies, totalRecall, buildTime)
-}
-
-func benchTQDB(train, test [][]float64, neighbors [][]int32, k, warmup, dim, bits int, useIVF bool, rescore int) benchResult {
+// buildCollection creates a tqdb collection, adds all training vectors,
+// and optionally builds an IVF index. Returns the collection and build time.
+func buildCollection(train [][]float64, dim, bits int, useIVF bool, maxPartitions int) (*store.Collection, time.Duration) {
 	buildStart := time.Now()
 	coll, _ := store.NewCollection(tqdb.Config{
 		Dim: dim, Bits: bits, Rotation: tqdb.RotationHadamard,
@@ -193,11 +171,17 @@ func benchTQDB(train, test [][]float64, neighbors [][]int32, k, warmup, dim, bit
 		coll.Add(fmt.Sprintf("%d", i), vec, nil)
 	}
 	if useIVF {
-		coll.CreateIndex(tqdb.IndexConfig{})
+		cfg := tqdb.IndexConfig{}
+		if maxPartitions > 0 {
+			cfg.NumPartitions = maxPartitions
+		}
+		coll.CreateIndex(cfg)
 	}
-	buildTime := time.Since(buildStart)
-	fmt.Printf("  Built in %s\n", buildTime.Round(time.Millisecond))
+	return coll, time.Since(buildStart)
+}
 
+// benchSearch runs search queries against an existing collection and returns recall/latency stats.
+func benchSearch(coll *store.Collection, test [][]float64, neighbors [][]int32, k, warmup, rescore int) benchResult {
 	var latencies []time.Duration
 	var totalRecall float64
 
@@ -222,6 +206,69 @@ func benchTQDB(train, test [][]float64, neighbors [][]int32, k, warmup, dim, bit
 				var idx int
 				fmt.Sscanf(r.ID, "%d", &idx) //nolint:errcheck
 				if truthSet[int32(idx)] {
+					hits++
+				}
+			}
+			totalRecall += float64(hits) / float64(k)
+		}
+	}
+
+	return computeStats(latencies, totalRecall, 0)
+}
+
+func benchFloat64BruteForce(train, test [][]float64, neighbors [][]int32, k, warmup, _ int) benchResult {
+	n := len(train)
+	buildStart := time.Now()
+	// Precompute norms.
+	norms := make([]float64, n)
+	for i, v := range train {
+		norms[i] = vecNorm(v)
+	}
+	buildTime := time.Since(buildStart)
+
+	var latencies []time.Duration
+	var totalRecall float64
+
+	type scored struct {
+		idx   int
+		score float64
+	}
+
+	for qi, query := range test {
+		qNorm := vecNorm(query)
+		start := time.Now()
+
+		// Top-k via sorted-insert (O(N×k) instead of O(N log N) full sort).
+		topBuf := make([]scored, 0, k+1)
+		minScore := -math.MaxFloat64
+
+		for i, vec := range train {
+			s := vecDot(query, vec) / (qNorm * norms[i])
+			if len(topBuf) >= k && s <= minScore {
+				continue
+			}
+			pos := sort.Search(len(topBuf), func(p int) bool { return topBuf[p].score < s })
+			topBuf = append(topBuf, scored{})
+			copy(topBuf[pos+1:], topBuf[pos:])
+			topBuf[pos] = scored{i, s}
+			if len(topBuf) > k {
+				topBuf = topBuf[:k]
+			}
+			if len(topBuf) == k {
+				minScore = topBuf[k-1].score
+			}
+		}
+		elapsed := time.Since(start)
+
+		if qi >= warmup {
+			latencies = append(latencies, elapsed)
+			truthSet := make(map[int32]bool, k)
+			for _, idx := range neighbors[qi][:k] {
+				truthSet[idx] = true
+			}
+			hits := 0
+			for _, s := range topBuf[:k] {
+				if truthSet[int32(s.idx)] {
 					hits++
 				}
 			}

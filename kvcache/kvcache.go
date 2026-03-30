@@ -167,27 +167,50 @@ func (kv *KVCache) AttentionScores(layer, head int, query []float64) []float64 {
 
 	if kv.packMode {
 		// Bit-packed path: unpack indices per position.
+		// Buffer hoisted outside loop to avoid per-position allocation.
 		rowSize := h.rowSize
 		unpackBuf := make([]uint8, wd)
 		for i := range n {
 			row := h.data[i*rowSize : i*rowSize+rowSize]
-			codec.Unpack4BitTo(unpackBuf, row) // fast path for 4-bit
-			var dot float64
-			for j := range wd {
-				dot += qRot[j] * centroids[unpackBuf[j]]
+			codec.Unpack4BitTo(unpackBuf, row)
+			var dot0, dot1 float64
+			j := 0
+			for ; j <= wd-8; j += 8 {
+				dot0 += qRot[j]*centroids[unpackBuf[j]] +
+					qRot[j+1]*centroids[unpackBuf[j+1]] +
+					qRot[j+2]*centroids[unpackBuf[j+2]] +
+					qRot[j+3]*centroids[unpackBuf[j+3]]
+				dot1 += qRot[j+4]*centroids[unpackBuf[j+4]] +
+					qRot[j+5]*centroids[unpackBuf[j+5]] +
+					qRot[j+6]*centroids[unpackBuf[j+6]] +
+					qRot[j+7]*centroids[unpackBuf[j+7]]
 			}
-			scores[i] = dot * qnScale * float64(kNorms[i])
+			for ; j < wd; j++ {
+				dot0 += qRot[j] * centroids[unpackBuf[j]]
+			}
+			scores[i] = (dot0 + dot1) * qnScale * float64(kNorms[i])
 		}
 	} else {
-		// Unpacked path: direct uint8 access.
+		// Unpacked path: direct uint8 access with 8-way unroll.
 		allIdx := h.data
 		for i := range n {
 			idx := allIdx[i*wd : i*wd+wd : i*wd+wd]
-			var dot float64
-			for j := range wd {
-				dot += qRot[j] * centroids[idx[j]]
+			var dot0, dot1 float64
+			j := 0
+			for ; j <= wd-8; j += 8 {
+				dot0 += qRot[j]*centroids[idx[j]] +
+					qRot[j+1]*centroids[idx[j+1]] +
+					qRot[j+2]*centroids[idx[j+2]] +
+					qRot[j+3]*centroids[idx[j+3]]
+				dot1 += qRot[j+4]*centroids[idx[j+4]] +
+					qRot[j+5]*centroids[idx[j+5]] +
+					qRot[j+6]*centroids[idx[j+6]] +
+					qRot[j+7]*centroids[idx[j+7]]
 			}
-			scores[i] = dot * qnScale * float64(kNorms[i])
+			for ; j < wd; j++ {
+				dot0 += qRot[j] * centroids[idx[j]]
+			}
+			scores[i] = (dot0 + dot1) * qnScale * float64(kNorms[i])
 		}
 	}
 

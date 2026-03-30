@@ -441,32 +441,7 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 
 	allIdx := s.allIndices
 
-	// Build candidate set from IVF + filter.
-	var candidates map[int]struct{}
-	if s.ivfIdx != nil {
-		topPartitions := s.ivfIdx.findNearestPartitions(queryRotated)
-		candidates = s.ivfIdx.candidatesFromPartitions(topPartitions)
-	}
-
-	scoreVec := func(i int) {
-		if opts.Filter != nil && !opts.Filter.Match(s.dataCache[i]) {
-			return
-		}
-
-		indices := allIdx[i*d : i*d+d : i*d+d]
-		var dot float64
-		j := 0
-		for ; j <= d-4; j += 4 {
-			i0, i1, i2, i3 := indices[j], indices[j+1], indices[j+2], indices[j+3]
-			dot += queryRotated[j]*centroids[i0] +
-				queryRotated[j+1]*centroids[i1] +
-				queryRotated[j+2]*centroids[i2] +
-				queryRotated[j+3]*centroids[i3]
-		}
-		for ; j < d; j++ {
-			dot += queryRotated[j] * centroids[indices[j]]
-		}
-
+	insertTopK := func(i int, dot float64) {
 		if opts.MinScore > 0 && dot < opts.MinScore {
 			return
 		}
@@ -474,12 +449,19 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 			return
 		}
 
-		pos := sort.Search(len(topBuf), func(p int) bool {
-			return topBuf[p].score < dot
-		})
+		// Manual binary search (avoids sort.Search closure alloc).
+		lo, hi := 0, len(topBuf)
+		for lo < hi {
+			mid := int(uint(lo+hi) >> 1)
+			if topBuf[mid].score < dot {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
 		topBuf = append(topBuf, scored{})
-		copy(topBuf[pos+1:], topBuf[pos:])
-		topBuf[pos] = scored{idx: i, score: dot}
+		copy(topBuf[lo+1:], topBuf[lo:])
+		topBuf[lo] = scored{idx: i, score: dot}
 
 		if len(topBuf) > effectiveK {
 			topBuf = topBuf[:effectiveK]
@@ -489,28 +471,54 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 		}
 	}
 
-	if candidates != nil {
-		for i := range candidates {
-			scoreVec(i)
+	scoreAndInsert := func(i int) {
+		if opts.Filter != nil && !opts.Filter.Match(s.dataCache[i]) {
+			return
 		}
+
+		indices := allIdx[i*d : i*d+d : i*d+d]
+		var dot0, dot1 float64
+		j := 0
+		for ; j <= d-8; j += 8 {
+			dot0 += queryRotated[j]*centroids[indices[j]] +
+				queryRotated[j+1]*centroids[indices[j+1]] +
+				queryRotated[j+2]*centroids[indices[j+2]] +
+				queryRotated[j+3]*centroids[indices[j+3]]
+			dot1 += queryRotated[j+4]*centroids[indices[j+4]] +
+				queryRotated[j+5]*centroids[indices[j+5]] +
+				queryRotated[j+6]*centroids[indices[j+6]] +
+				queryRotated[j+7]*centroids[indices[j+7]]
+		}
+		for ; j < d; j++ {
+			dot0 += queryRotated[j] * centroids[indices[j]]
+		}
+		insertTopK(i, dot0+dot1)
+	}
+
+	if s.ivfIdx != nil {
+		topPartitions := s.ivfIdx.findNearestPartitions(queryRotated, s.ivfIdx.scoreBuf)
+		s.ivfIdx.forEachCandidate(topPartitions, func(i int) {
+			scoreAndInsert(i)
+		})
 	} else {
 		for i := range n {
-			scoreVec(i)
+			scoreAndInsert(i)
 		}
 	}
 
 	s.quantizer.PutBuf(queryRotated)
 
 	// Rescore: dequantize top candidates and re-rank with exact cosine similarity.
+	// Single reusable buffer for all dequantizations.
 	if opts.Rescore > 0 && len(topBuf) > 0 {
+		origDim := s.quantizer.GetConfig().Dim
+		bits := s.quantizer.GetConfig().Bits
+		recon := make([]float64, origDim)
+		cv := tqdb.CompressedVector{Dim: origDim, Bits: bits}
 		for k := range topBuf {
-			cv := &tqdb.CompressedVector{
-				Dim:     s.quantizer.GetConfig().Dim,
-				Bits:    s.quantizer.GetConfig().Bits,
-				Norm:    s.norms[topBuf[k].idx],
-				Indices: allIdx[topBuf[k].idx*d : topBuf[k].idx*d+d],
-			}
-			recon := s.quantizer.Dequantize(cv)
+			cv.Norm = s.norms[topBuf[k].idx]
+			cv.Indices = allIdx[topBuf[k].idx*d : topBuf[k].idx*d+d]
+			s.quantizer.DequantizeTo(recon, &cv)
 			topBuf[k].score = mathutil.CosineSimilarity(query, recon)
 		}
 		sort.Slice(topBuf, func(i, j int) bool {
@@ -544,6 +552,46 @@ func (s *Store) searchInternal(query []float64, opts tqdb.SearchOptions) []tqdb.
 	}
 
 	return results
+}
+
+// ForEachCompressed iterates all stored vectors, calling fn with the raw data.
+// Used for loading a Store's contents into a Collection.
+// The indices slice is a view into mmap'd storage and must not be modified.
+func (s *Store) ForEachCompressed(fn func(id string, indices []uint8, norm float32, content string, data map[string]any)) {
+	if s.mode != modeRead {
+		return
+	}
+	s.ensureIDsLoaded()
+	s.ensureDataCached()
+	d := s.workDim
+	for i := range s.numVecs {
+		fn(s.ids[i], s.allIndices[i*d:i*d+d], s.norms[i], s.contents[i], s.dataCache[i])
+	}
+}
+
+// AddRaw adds pre-compressed vector data without re-quantizing.
+// Used for persisting a Collection's state to a Store file.
+// Only valid in write mode (created via Create).
+func (s *Store) AddRaw(id string, indices []uint8, norm float32, content string, data map[string]any) error {
+	if s.mode != modeWrite {
+		return fmt.Errorf("tqdb: AddRaw called on read-only store")
+	}
+
+	var dataJSON []byte
+	if len(data) > 0 {
+		var err error
+		dataJSON, err = json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("tqdb: marshal data: %w", err)
+		}
+	}
+
+	s.buf.allIndices = append(s.buf.allIndices, indices...)
+	s.buf.norms = append(s.buf.norms, norm)
+	s.buf.ids = append(s.buf.ids, id)
+	s.buf.data = append(s.buf.data, dataJSON)
+	s.buf.contents = append(s.buf.contents, content)
+	return nil
 }
 
 // Info returns statistics about the store.

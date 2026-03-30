@@ -3,7 +3,6 @@ package store
 import (
 	"math"
 	"math/rand/v2"
-	"sort"
 )
 
 // ivfIndex holds IVF (Inverted File) partitions for approximate nearest neighbor search.
@@ -14,6 +13,10 @@ type ivfIndex struct {
 	nProbe        int         // number of partitions to search
 	centroids     [][]float64 // [numPartitions][workDim] — partition centroids in rotated space
 	partitions    [][]int     // [numPartitions][]int — vector indices per partition
+
+	// Reusable buffers to avoid per-search allocations.
+	probeBuf []int     // reused by findNearestPartitions (length nProbe)
+	scoreBuf []float64 // reused by findNearestPartitions (length numPartitions)
 }
 
 // buildIVF constructs an IVF index over the collection's quantized vectors.
@@ -57,55 +60,101 @@ func buildIVF(allIndices []uint8, codebookCentroids []float64, workDim, n, numPa
 		nProbe:        nProbe,
 		centroids:     centroids,
 		partitions:    partitions,
+		probeBuf:      make([]int, nProbe),
+		scoreBuf:      make([]float64, numPartitions),
 	}
 }
 
-// findNearestPartitions returns the indices of the top-P nearest partition centroids to the query.
-func (idx *ivfIndex) findNearestPartitions(queryRotated []float64) []int {
-	type scored struct {
-		partition int
-		score     float64
+// findNearestPartitions returns the indices of the top-P nearest partition centroids
+// using a partial selection (no full sort). Reuses pre-allocated buffers.
+func (idx *ivfIndex) findNearestPartitions(queryRotated []float64, scoreBuf []float64) []int {
+	k := idx.numPartitions
+
+	// Compute dot products against all centroids.
+	// Reuse caller-provided scoreBuf to avoid allocation.
+	if len(scoreBuf) < k {
+		scoreBuf = make([]float64, k)
 	}
-	scores := make([]scored, idx.numPartitions)
-	for p := range idx.numPartitions {
+	for p := range k {
+		c := idx.centroids[p]
 		var dot float64
-		for j, v := range queryRotated {
-			if j < len(idx.centroids[p]) {
-				dot += v * idx.centroids[p][j]
+		j := 0
+		for ; j <= len(c)-4; j += 4 {
+			dot += queryRotated[j]*c[j] +
+				queryRotated[j+1]*c[j+1] +
+				queryRotated[j+2]*c[j+2] +
+				queryRotated[j+3]*c[j+3]
+		}
+		for ; j < len(c); j++ {
+			dot += queryRotated[j] * c[j]
+		}
+		scoreBuf[p] = dot
+	}
+
+	// Partial top-nProbe selection via linear scan (faster than sort for small nProbe).
+	nProbe := idx.nProbe
+	if nProbe > k {
+		nProbe = k
+	}
+
+	// Reuse the result buffer stored on the index.
+	result := idx.probeBuf
+	if len(result) < nProbe {
+		result = make([]int, nProbe)
+		idx.probeBuf = result
+	}
+	result = result[:nProbe]
+
+	// Initialize with first nProbe partitions.
+	for i := range nProbe {
+		result[i] = i
+	}
+	// Find the minimum score among the current top set.
+	minIdx := 0
+	minVal := scoreBuf[0]
+	for i := 1; i < nProbe; i++ {
+		if scoreBuf[result[i]] < minVal {
+			minVal = scoreBuf[result[i]]
+			minIdx = i
+		}
+	}
+	// Scan remaining partitions, replacing the minimum when a better one is found.
+	for p := nProbe; p < k; p++ {
+		if scoreBuf[p] > minVal {
+			result[minIdx] = p
+			// Re-find minimum in the result set.
+			minIdx = 0
+			minVal = scoreBuf[result[0]]
+			for i := 1; i < nProbe; i++ {
+				if scoreBuf[result[i]] < minVal {
+					minVal = scoreBuf[result[i]]
+					minIdx = i
+				}
 			}
 		}
-		scores[p] = scored{partition: p, score: dot}
-	}
-
-	sort.Slice(scores, func(i, j int) bool {
-		return scores[i].score > scores[j].score
-	})
-
-	nProbe := idx.nProbe
-	if nProbe > idx.numPartitions {
-		nProbe = idx.numPartitions
-	}
-
-	result := make([]int, nProbe)
-	for i := range nProbe {
-		result[i] = scores[i].partition
 	}
 	return result
 }
 
-// candidatesFromPartitions returns the union of vector indices from the given partitions.
-func (idx *ivfIndex) candidatesFromPartitions(partitionIDs []int) map[int]struct{} {
-	total := 0
-	for _, p := range partitionIDs {
-		total += len(idx.partitions[p])
+// candidatesFromPartitions iterates over candidate vector indices from selected partitions,
+// calling fn for each candidate. Avoids allocating a map.
+func (idx *ivfIndex) forEachCandidate(partitionIDs []int, fn func(int)) {
+	if len(partitionIDs) == 1 {
+		// Fast path: single partition, no dedup needed.
+		for _, vecIdx := range idx.partitions[partitionIDs[0]] {
+			fn(vecIdx)
+		}
+		return
 	}
-	candidates := make(map[int]struct{}, total)
+	// Multiple partitions: use a bitset for O(1) dedup when N is known,
+	// or iterate partition slices directly (partitions are disjoint by construction).
+	// IVF partitions are disjoint — each vector belongs to exactly one partition.
+	// No dedup needed.
 	for _, p := range partitionIDs {
 		for _, vecIdx := range idx.partitions[p] {
-			candidates[vecIdx] = struct{}{}
+			fn(vecIdx)
 		}
 	}
-	return candidates
 }
 
 // --- k-means implementation ---

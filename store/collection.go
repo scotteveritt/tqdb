@@ -545,23 +545,25 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 	d := c.dim
 	centroids := c.quantizer.Codebook().Centroids
 
-	// Rotate the unit query once.
-	queryRotated := c.quantizer.GetBuf()
+	// Rotate the unit query once. Use a single pooled buffer for normalize+rotate.
 	queryNorm := mathutil.Norm(query)
 	if queryNorm < 1e-15 {
-		c.quantizer.PutBuf(queryRotated)
 		c.mu.RUnlock()
 		return nil
 	}
 
-	// Normalize query before rotation so the inner product = cosine similarity.
+	queryRotated := c.quantizer.GetBuf()
+	// Normalize into the first `dim` elements of queryRotated (reuse as temp).
 	invQN := 1.0 / queryNorm
-	unitQuery := c.quantizer.GetBuf()
-	for i, v := range query {
-		unitQuery[i] = v * invQN
+	origDim := c.quantizer.GetConfig().Dim
+	for i := range origDim {
+		queryRotated[i] = query[i] * invQN
 	}
-	c.quantizer.Rotation().Rotate(queryRotated, unitQuery[:c.quantizer.GetConfig().Dim])
-	c.quantizer.PutBuf(unitQuery)
+	// Rotate in-place: rotate needs src != dst, so use a second buf only for rotation.
+	unitBuf := c.quantizer.GetBuf()
+	copy(unitBuf[:origDim], queryRotated[:origDim])
+	c.quantizer.Rotation().Rotate(queryRotated, unitBuf[:origDim])
+	c.quantizer.PutBuf(unitBuf)
 
 	// Top-k via sorted-insert (with extra capacity for offset + rescore).
 	effectiveK := topK + opts.Offset
@@ -576,63 +578,10 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 	minScore := -math.MaxFloat64
 
 	allIdx := c.allIndices
+	deleted := c.deleted
 
-	// Build candidate set from indexes (IVF + filter).
-	var candidates map[int]struct{}
-
-	// IVF partition pruning: only score vectors in nearby partitions.
-	if c.ivfIdx != nil {
-		topPartitions := c.ivfIdx.findNearestPartitions(queryRotated)
-		candidates = c.ivfIdx.candidatesFromPartitions(topPartitions)
-	}
-
-	// Filter index: resolve filter to candidate set.
-	if opts.Filter != nil && c.filterIdx != nil {
-		filterCands := c.filterCandidates(opts.Filter)
-		if filterCands != nil {
-			if candidates != nil {
-				// Intersect IVF candidates with filter candidates.
-				for id := range candidates {
-					if _, ok := filterCands[id]; !ok {
-						delete(candidates, id)
-					}
-				}
-			} else {
-				candidates = filterCands
-			}
-		}
-	}
-
-	// Score vectors — either candidate set (indexed) or all vectors (brute-force).
-	scoreVec := func(i int) {
-		if c.deleted[i] {
-			return
-		}
-		// If we have candidates from the index, skip non-candidates.
-		// If candidates is nil, fall back to brute-force filter evaluation.
-		if candidates != nil {
-			if _, ok := candidates[i]; !ok {
-				return
-			}
-		} else if filterFn != nil && !filterFn(c.dataFields[i]) {
-			return
-		}
-
-		indices := allIdx[i*d : i*d+d : i*d+d]
-
-		var dot float64
-		j := 0
-		for ; j <= d-4; j += 4 {
-			i0, i1, i2, i3 := indices[j], indices[j+1], indices[j+2], indices[j+3]
-			dot += queryRotated[j]*centroids[i0] +
-				queryRotated[j+1]*centroids[i1] +
-				queryRotated[j+2]*centroids[i2] +
-				queryRotated[j+3]*centroids[i3]
-		}
-		for ; j < d; j++ {
-			dot += queryRotated[j] * centroids[indices[j]]
-		}
-
+	// Inline scoring function with manual binary search (avoids sort.Search closure alloc).
+	insertTopK := func(i int, dot float64) {
 		if opts.MinScore > 0 && dot < opts.MinScore {
 			return
 		}
@@ -640,12 +589,19 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 			return
 		}
 
-		pos := sort.Search(len(topBuf), func(p int) bool {
-			return topBuf[p].score < dot
-		})
+		// Binary search: find insertion point where topBuf[pos].score < dot.
+		lo, hi := 0, len(topBuf)
+		for lo < hi {
+			mid := int(uint(lo+hi) >> 1) // avoid overflow
+			if topBuf[mid].score < dot {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
 		topBuf = append(topBuf, scored{})
-		copy(topBuf[pos+1:], topBuf[pos:])
-		topBuf[pos] = scored{idx: i, score: dot}
+		copy(topBuf[lo+1:], topBuf[lo:])
+		topBuf[lo] = scored{idx: i, score: dot}
 
 		if len(topBuf) > effectiveK {
 			topBuf = topBuf[:effectiveK]
@@ -655,31 +611,102 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 		}
 	}
 
-	if candidates != nil {
-		// Indexed path: only score candidate vectors.
-		for i := range candidates {
-			scoreVec(i)
+	scoreAndInsert := func(i int) {
+		indices := allIdx[i*d : i*d+d : i*d+d]
+		var dot0, dot1 float64
+		j := 0
+		for ; j <= d-8; j += 8 {
+			dot0 += queryRotated[j]*centroids[indices[j]] +
+				queryRotated[j+1]*centroids[indices[j+1]] +
+				queryRotated[j+2]*centroids[indices[j+2]] +
+				queryRotated[j+3]*centroids[indices[j+3]]
+			dot1 += queryRotated[j+4]*centroids[indices[j+4]] +
+				queryRotated[j+5]*centroids[indices[j+5]] +
+				queryRotated[j+6]*centroids[indices[j+6]] +
+				queryRotated[j+7]*centroids[indices[j+7]]
+		}
+		for ; j < d; j++ {
+			dot0 += queryRotated[j] * centroids[indices[j]]
+		}
+		insertTopK(i, dot0+dot1)
+	}
+
+	// Build candidate set from indexes (IVF + filter).
+	var filterCands map[int]struct{}
+	if opts.Filter != nil && c.filterIdx != nil {
+		filterCands = c.filterCandidates(opts.Filter)
+	}
+
+	if c.ivfIdx != nil {
+		// IVF path: iterate partitions directly — no map allocation.
+		topPartitions := c.ivfIdx.findNearestPartitions(queryRotated, c.ivfIdx.scoreBuf)
+
+		if filterCands != nil {
+			// IVF + filter: intersect by checking filter membership.
+			c.ivfIdx.forEachCandidate(topPartitions, func(i int) {
+				if deleted[i] {
+					return
+				}
+				if _, ok := filterCands[i]; !ok {
+					return
+				}
+				scoreAndInsert(i)
+			})
+		} else if filterFn != nil {
+			// IVF + brute-force filter (no inverted index for this filter).
+			c.ivfIdx.forEachCandidate(topPartitions, func(i int) {
+				if deleted[i] {
+					return
+				}
+				if !filterFn(c.dataFields[i]) {
+					return
+				}
+				scoreAndInsert(i)
+			})
+		} else {
+			// IVF only, no filter.
+			c.ivfIdx.forEachCandidate(topPartitions, func(i int) {
+				if deleted[i] {
+					return
+				}
+				scoreAndInsert(i)
+			})
+		}
+	} else if filterCands != nil {
+		// Filter-only path (no IVF).
+		for i := range filterCands {
+			if deleted[i] {
+				continue
+			}
+			scoreAndInsert(i)
 		}
 	} else {
 		// Brute-force path: score all vectors.
 		for i := range n {
-			scoreVec(i)
+			if deleted[i] {
+				continue
+			}
+			if filterFn != nil && !filterFn(c.dataFields[i]) {
+				continue
+			}
+			scoreAndInsert(i)
 		}
 	}
 
 	c.quantizer.PutBuf(queryRotated)
 
 	// Rescore: dequantize top candidates and re-rank with exact cosine similarity.
+	// Uses a single reusable buffer for all dequantizations to avoid per-candidate allocation.
 	if opts.Rescore > 0 && len(topBuf) > 0 {
 		allIdx := c.allIndices
+		origDim := c.quantizer.GetConfig().Dim
+		bits := c.quantizer.GetConfig().Bits
+		recon := make([]float64, origDim) // single buffer reused for all candidates
+		cv := tqdb.CompressedVector{Dim: origDim, Bits: bits}
 		for k := range topBuf {
-			cv := &tqdb.CompressedVector{
-				Dim:     c.quantizer.GetConfig().Dim,
-				Bits:    c.quantizer.GetConfig().Bits,
-				Norm:    c.norms[topBuf[k].idx],
-				Indices: allIdx[topBuf[k].idx*d : topBuf[k].idx*d+d],
-			}
-			recon := c.quantizer.Dequantize(cv)
+			cv.Norm = c.norms[topBuf[k].idx]
+			cv.Indices = allIdx[topBuf[k].idx*d : topBuf[k].idx*d+d]
+			c.quantizer.DequantizeTo(recon, &cv)
 			topBuf[k].score = mathutil.CosineSimilarity(query, recon)
 		}
 		sort.Slice(topBuf, func(i, j int) bool {
@@ -711,6 +738,35 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 
 	c.mu.RUnlock()
 	return results
+}
+
+// ForEach iterates all non-deleted entries, calling fn for each.
+// Used for persistence (writing collection state to a Store file).
+// The indices slice is a view into internal storage and must not be modified.
+func (c *Collection) ForEach(fn func(id string, indices []uint8, norm float32, content string, data map[string]any)) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	d := c.dim
+	for i, id := range c.ids {
+		if c.deleted[i] {
+			continue
+		}
+		fn(id, c.allIndices[i*d:i*d+d], c.norms[i], c.contents[i], c.dataFields[i])
+	}
+}
+
+// AddRawDocument stores pre-compressed vector data with content and metadata.
+// Unlike AddCompressed, this preserves the document content field.
+// Used for loading from a Store file back into a Collection.
+// Silently skips if the ID already exists.
+func (c *Collection) AddRawDocument(id string, indices []uint8, norm float32, content string, data map[string]any) {
+	c.mu.RLock()
+	_, exists := c.idIndex[id]
+	c.mu.RUnlock()
+	if exists {
+		return
+	}
+	c.addCompressed(id, content, indices, norm, data)
 }
 
 // Len returns the number of vectors in the collection (including deleted).
