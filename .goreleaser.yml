@@ -2,8 +2,14 @@ version: 2
 
 before:
   hooks:
-    # Generate fresh PGO profile before building release binaries
-    - go test -cpuprofile=cmd/tqdb/default.pgo -bench="BenchmarkSearch_BruteForce_10K_d128|BenchmarkScoreVec_d128_N10K" -count=3 -timeout=60s -short ./store/
+    # Generate fresh PGO profiles before building release binaries.
+    # Profile all hot paths: brute-force scoring, IVF search, rotation, KV cache.
+    - >-
+      sh -c '
+      go test -cpuprofile=/tmp/pgo1.pprof -bench="BenchmarkSearch_BruteForce_10K|BenchmarkSearch_IVF|BenchmarkSearch_Rescore|BenchmarkScoreVec|BenchmarkQueryRotation" -count=3 -timeout=120s -short ./store/ &&
+      go test -cpuprofile=/tmp/pgo2.pprof -bench="BenchmarkKVCacheAttention" -count=3 -timeout=30s -short ./kvcache/ &&
+      go tool pprof -proto /tmp/pgo1.pprof /tmp/pgo2.pprof > cmd/tqdb/default.pgo
+      '
 
 builds:
   - id: tqdb
