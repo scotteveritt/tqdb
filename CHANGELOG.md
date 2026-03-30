@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.4.0](https://github.com/scotteveritt/tqdb/compare/v0.3.0...v0.4.0) (2026-03-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* redesign CLI with cobra, text search, workspace support
+
+### Features
+
+* add goreleaser for cross-platform binary releases ([fdaa116](https://github.com/scotteveritt/tqdb/commit/fdaa11659dfc11b3cb55ab5eb79106858021113a))
+* bit-packed .tq format + configurable bit-width + improvement experiments ([a933865](https://github.com/scotteveritt/tqdb/commit/a933865fb4b8d047626838dae6987523bd920e04))
+* float32 scoring in all search and attention loops ([ad175fd](https://github.com/scotteveritt/tqdb/commit/ad175fdd3cced19f8c4547623d62b065da6b4055))
+* redesign CLI with cobra, text search, workspace support ([3a5a188](https://github.com/scotteveritt/tqdb/commit/3a5a188660be32fcdf0c22471d481b4fb10a0a5c))
+
+
+### Bug Fixes
+
+* check error returns on Close/Body.Close (errcheck lint) ([def8264](https://github.com/scotteveritt/tqdb/commit/def8264c824d6824e11124daf38e9857a52d15c1))
+* profile all hot paths for PGO, not just brute-force ([3fd969a](https://github.com/scotteveritt/tqdb/commit/3fd969a973e51c2306b367c9444de6ea57732086))
+* remove unused vecNormF function (lint) ([df0aaec](https://github.com/scotteveritt/tqdb/commit/df0aaec30a3eaf1a61cf3b66f945053eec3f4efd))
+* skip long-running hypothesis tests in CI, add Centroids32 to Codebook ([4ee895a](https://github.com/scotteveritt/tqdb/commit/4ee895af2a02b7e0b4f57a8d376265badbaec1cd))
+* suppress unparam lint in improvement test helper ([6785ae2](https://github.com/scotteveritt/tqdb/commit/6785ae2c60436ed06968a68a7f5f4d5be3a45bf2))
+
+
+### Performance Improvements
+
+* add PGO profiles for 10% faster brute-force search ([444ecb0](https://github.com/scotteveritt/tqdb/commit/444ecb0a336e14f253d786e2e1103e78c50a1b90))
+* regenerate PGO profiles from current code ([cbae071](https://github.com/scotteveritt/tqdb/commit/cbae07159801458129ecbdcab6fd6e0ae4e72aec))
+
 ## [0.3.0](https://github.com/scotteveritt/tqdb/compare/v0.2.19...v0.3.0) (2026-03-30)
 
 
