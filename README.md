@@ -101,8 +101,8 @@ All measurements on Apple M4 Pro, 25K Gemini embeddings, d=3072.
 
 | Mode | Recall@10 | p50 | QPS |
 |------|-----------|-----|-----|
-| Brute-force (8-bit) | ~99% | 2.9ms | 343 |
-| Brute-force (4-bit) | ~89% | 2.9ms | 343 |
+| Brute-force (8-bit) | ~99% | 2.7ms | 379 |
+| Brute-force (4-bit) | ~89% | 2.7ms | 379 |
 | IVF + rescore | ~92% | 9.4ms | 106 |
 
 ### vs chromem-go
@@ -110,7 +110,7 @@ All measurements on Apple M4 Pro, 25K Gemini embeddings, d=3072.
 | Metric | chromem-go | tqdb | Improvement |
 |--------|-----------|------|-------------|
 | Startup | 6.2s | **10ms** | **620x** |
-| Search | 72ms | **2.9ms** | **25x** |
+| Search | 72ms | **2.7ms** | **27x** |
 | Disk | 397 MB (25K files) | **140 MB** (1 file) | **2.8x** |
 | Recall@10 | 100% (exact) | **~99%** (8-bit) | -1% |
 
