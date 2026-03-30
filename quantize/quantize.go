@@ -249,16 +249,19 @@ func lookupPrecomputed(d, bits int) *codec.Codebook {
 
 	numLevels := 1 << bits
 	centroidsSq := make([]float64, numLevels)
+	centroids32 := make([]float32, numLevels)
 	for i, c := range entry.Centroids {
 		centroidsSq[i] = c * c
+		centroids32[i] = float32(c)
 	}
 
 	return &codec.Codebook{
-		Dim:         d,
-		Bits:        bits,
-		NumLevels:   numLevels,
-		Centroids:   entry.Centroids,
-		Boundaries:  entry.Boundaries,
-		CentroidsSq: centroidsSq,
+		Dim:          d,
+		Bits:         bits,
+		NumLevels:    numLevels,
+		Centroids:    entry.Centroids,
+		Centroids32:  centroids32,
+		Boundaries:   entry.Boundaries,
+		CentroidsSq:  centroidsSq,
 	}
 }

@@ -11,13 +11,14 @@ import (
 // Codebook holds precomputed Lloyd-Max centroids and decision boundaries
 // for a given dimension and bit-width.
 type Codebook struct {
-	Dim         int       // vector dimension d (determines σ = 1/√d)
-	Bits        int       // quantization bits per coordinate
-	NumLevels   int       // 2^Bits
-	Centroids   []float64 // length NumLevels, sorted ascending
-	Boundaries  []float64 // length NumLevels-1, decision thresholds
-	CentroidsSq []float64 // Centroids[i]², precomputed for fast norm calculation
-	Distortion  float64   // expected MSE distortion per coordinate
+	Dim          int       // vector dimension d (determines σ = 1/√d)
+	Bits         int       // quantization bits per coordinate
+	NumLevels    int       // 2^Bits
+	Centroids    []float64 // length NumLevels, sorted ascending
+	Centroids32  []float32 // length NumLevels, float32 copy for fast scoring loops
+	Boundaries   []float64 // length NumLevels-1, decision thresholds
+	CentroidsSq  []float64 // Centroids[i]², precomputed for fast norm calculation
+	Distortion   float64   // expected MSE distortion per coordinate
 }
 
 // SolveCodebook computes the optimal Lloyd-Max codebook for the Gaussian
@@ -99,22 +100,25 @@ func SolveCodebook(d, bits int, useExact bool) *Codebook {
 		boundaries[i] = (centroids[i] + centroids[i+1]) * 0.5
 	}
 
-	// Precompute squared centroids
+	// Precompute squared centroids and float32 copy for scoring.
 	centroidsSq := make([]float64, numLevels)
+	centroids32 := make([]float32, numLevels)
 	for i, c := range centroids {
 		centroidsSq[i] = c * c
+		centroids32[i] = float32(c)
 	}
 
 	distortion := computeDistortion(centroids, boundaries, pdf, clipLo, clipHi)
 
 	return &Codebook{
-		Dim:         d,
-		Bits:        bits,
-		NumLevels:   numLevels,
-		Centroids:   centroids,
-		Boundaries:  boundaries,
-		CentroidsSq: centroidsSq,
-		Distortion:  distortion,
+		Dim:          d,
+		Bits:         bits,
+		NumLevels:    numLevels,
+		Centroids:    centroids,
+		Centroids32:  centroids32,
+		Boundaries:   boundaries,
+		CentroidsSq:  centroidsSq,
+		Distortion:   distortion,
 	}
 }
 

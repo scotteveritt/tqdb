@@ -22,6 +22,9 @@ import (
 // ============================================================================
 
 func TestHypothesis1_ExactPDF_vs_Gaussian(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running hypothesis test")
+	}
 	for _, d := range []int{64, 128, 768, 3072} {
 		for _, bits := range []int{4, 5, 8} {
 			name := fmt.Sprintf("d=%d_%dbit", d, bits)
@@ -51,6 +54,9 @@ func TestHypothesis1_ExactPDF_vs_Gaussian(t *testing.T) {
 // ============================================================================
 
 func TestHypothesis2_SubvectorNormCorrection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running hypothesis test")
+	}
 	for _, d := range []int{128, 768, 3072} {
 		name := fmt.Sprintf("d=%d_4bit", d)
 		t.Run(name, func(t *testing.T) {
@@ -70,6 +76,9 @@ func TestHypothesis2_SubvectorNormCorrection(t *testing.T) {
 // ============================================================================
 
 func TestHypothesis3_BitWidthTradeoff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running hypothesis test")
+	}
 	for _, d := range []int{128, 3072} {
 		for bits := 3; bits <= 8; bits++ {
 			name := fmt.Sprintf("d=%d_%dbit", d, bits)
