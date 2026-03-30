@@ -36,6 +36,9 @@ type hnswIndex struct {
 
 	// RNG for level assignment (deterministic for reproducibility)
 	rng *rand.Rand
+
+	// Pooled search buffers to reduce per-search allocations.
+	visitedPool sync.Pool
 }
 
 // uint32Slice is a named type for a neighbor list.
@@ -227,14 +230,83 @@ func (h *hnswIndex) Search(distToQuery func(nodeID int) float32, k, ef int) []ca
 		}
 	}
 
+	// Get pooled visited set.
+	vs := h.getVisitedSet()
+
 	// Beam search at layer 0.
-	results := h.searchLayer(-1, []candidate{{id: ep, dist: epDist}}, ef, 0,
-		func(_, b int) float32 { return distToQuery(b) })
+	results := h.searchLayerPooled([]candidate{{id: ep, dist: epDist}}, ef, 0,
+		func(_, b int) float32 { return distToQuery(b) }, vs)
+
+	// Return visited set to pool.
+	h.putVisitedSet(vs)
 
 	// Return top-k.
 	if len(results) > k {
 		results = results[:k]
 	}
+	return results
+}
+
+func (h *hnswIndex) getVisitedSet() *visitedSet {
+	if v, ok := h.visitedPool.Get().(*visitedSet); ok {
+		v.Reset()
+		// Grow if needed.
+		if len(v.data) < len(h.edges) {
+			v.data = make([]byte, len(h.edges))
+			v.version = 1
+		}
+		return v
+	}
+	return newVisitedSet(len(h.edges))
+}
+
+func (h *hnswIndex) putVisitedSet(vs *visitedSet) {
+	h.visitedPool.Put(vs)
+}
+
+// searchLayerPooled is searchLayer with an externally-provided visited set.
+func (h *hnswIndex) searchLayerPooled(entryPoints []candidate, ef, level int, distFunc func(a, b int) float32, visited *visitedSet) []candidate {
+	for _, ep := range entryPoints {
+		visited.Visit(ep.id)
+	}
+
+	// Use pre-sized slices.
+	cands := make([]candidate, len(entryPoints), ef)
+	copy(cands, entryPoints)
+	results := make([]candidate, len(entryPoints), ef)
+	copy(results, entryPoints)
+
+	for len(cands) > 0 {
+		best := cands[0]
+		cands = cands[1:]
+
+		worstDist := results[len(results)-1].dist
+		if best.dist > worstDist && len(results) >= ef {
+			break
+		}
+
+		if int(best.id) < len(h.edges) && h.edges[best.id] != nil && level < len(h.edges[best.id]) {
+			for _, neighbor := range h.edges[best.id][level] {
+				if !visited.Visit(neighbor) {
+					continue
+				}
+				if h.deleted[neighbor] {
+					continue
+				}
+
+				d := distFunc(0, int(neighbor))
+
+				if len(results) < ef || d < results[len(results)-1].dist {
+					results = insertSorted(results, candidate{id: neighbor, dist: d})
+					if len(results) > ef {
+						results = results[:ef]
+					}
+					cands = insertSorted(cands, candidate{id: neighbor, dist: d})
+				}
+			}
+		}
+	}
+
 	return results
 }
 
