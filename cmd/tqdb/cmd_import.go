@@ -95,7 +95,7 @@ func importJSONL(_ *cobra.Command, outPath, from string, bits, dim int, doEmbed 
 		if err != nil {
 			return err
 		}
-		defer input.Close()
+		defer func() { _ = input.Close() }()
 	} else {
 		input = os.Stdin
 	}
@@ -318,12 +318,12 @@ func decodeChromemGob(path string) (*chromemDoc, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	var doc chromemDoc
 	if err := gob.NewDecoder(gz).Decode(&doc); err != nil {
 		return nil, err

@@ -48,7 +48,7 @@ Examples:
 				if err != nil {
 					return err
 				}
-				defer output.Close()
+				defer func() { _ = output.Close() }()
 			} else {
 				output = os.Stdout
 			}
