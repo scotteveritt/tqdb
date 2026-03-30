@@ -1,0 +1,46 @@
+version: 2
+
+before:
+  hooks:
+    # Generate fresh PGO profile before building release binaries
+    - go test -cpuprofile=cmd/tqdb/default.pgo -bench="BenchmarkSearch_BruteForce_10K_d128|BenchmarkScoreVec_d128_N10K" -count=3 -timeout=60s -short ./store/
+
+builds:
+  - id: tqdb
+    main: ./cmd/tqdb
+    binary: tqdb
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: tqdb
+    builds: [tqdb]
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "tqdb_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  github:
+    owner: scotteveritt
+    name: tqdb
