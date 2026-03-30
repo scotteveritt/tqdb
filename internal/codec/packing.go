@@ -17,22 +17,27 @@ func PackIndicesTo(dst []byte, indices []uint8, bits int) {
 	}
 }
 
-// unpackIndices unpacks indices from a compact byte slice.
+// UnpackIndices unpacks indices from a compact byte slice (allocates).
 func UnpackIndices(packed []byte, n, bits int) []uint8 {
 	out := make([]uint8, n)
+	UnpackIndicesTo(packed, out, n, bits)
+	return out
+}
+
+// UnpackIndicesTo unpacks indices into a pre-allocated dst slice.
+func UnpackIndicesTo(packed []byte, dst []uint8, n, bits int) {
 	switch bits {
 	case 4:
-		Unpack4BitTo(out, packed)
+		Unpack4BitTo(dst[:n], packed)
 	case 2:
-		Unpack2BitTo(out, packed)
+		Unpack2BitTo(dst[:n], packed)
 	case 3:
-		Unpack3BitTo(out, packed)
+		Unpack3BitTo(dst[:n], packed)
 	case 1:
-		Unpack1BitTo(out, packed)
+		Unpack1BitTo(dst[:n], packed)
 	default:
-		copy(out, packed[:n])
+		copy(dst[:n], packed[:n])
 	}
-	return out
 }
 
 // PackedSize returns the number of bytes needed to pack n indices at the given bit-width.

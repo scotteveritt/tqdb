@@ -6,6 +6,7 @@ import (
 	"math"
 
 	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/internal/codec"
 )
 
 // File format constants.
@@ -18,12 +19,14 @@ const (
 // .tq file layout:
 //
 //	[Header 64B]
-//	[Indices: N × workDim uint8]
+//	[Indices: N × packedRowSize bytes, bit-packed per header.Bits]
 //	[Norms: N × float32 LE]
 //	[IDs: length-prefixed strings]
 //	[Data: length-prefixed JSON blobs (map[string]any)]
 //	[Contents: length-prefixed strings]
 //
+// Indices are bit-packed: 4-bit stores 2 indices per byte, 8-bit stores 1 per byte.
+// packedRowSize = codec.PackedSize(workDim, bits).
 // All offsets in the header are absolute byte positions.
 
 // fileHeader is the in-memory representation of the .tq file header.
@@ -94,9 +97,15 @@ func decodeHeader(src []byte) (fileHeader, error) {
 func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 	numVecs := len(buf.norms)
 	wdim := workDim
+	bits := cfg.Bits
+	if bits <= 0 || bits > 8 {
+		bits = 8
+	}
 
 	// Compute section offsets.
-	indicesSize := numVecs * wdim
+	// Indices are bit-packed: packedRowSize bytes per vector.
+	packedRowSize := codec.PackedSize(wdim, bits)
+	indicesSize := numVecs * packedRowSize
 	normsSize := numVecs * 4
 
 	normsOff := uint32(fileHeaderSize + indicesSize)
@@ -148,8 +157,18 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 	}
 	encodeHeader(data[:fileHeaderSize], hdr)
 
-	// Indices section.
-	copy(data[fileHeaderSize:], buf.allIndices)
+	// Indices section (bit-packed).
+	if bits == 8 {
+		// No packing needed, direct copy.
+		copy(data[fileHeaderSize:], buf.allIndices)
+	} else {
+		off := fileHeaderSize
+		for i := range numVecs {
+			row := buf.allIndices[i*wdim : i*wdim+wdim]
+			codec.PackIndicesTo(data[off:off+packedRowSize], row, bits)
+			off += packedRowSize
+		}
+	}
 
 	// Norms section.
 	off := int(normsOff)

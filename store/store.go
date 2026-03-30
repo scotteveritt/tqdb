@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/internal/codec"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
 	"github.com/scotteveritt/tqdb/quantize"
 )
@@ -208,9 +209,14 @@ func Open(path string) (*Store, error) {
 
 	numVecs := int(hdr.NumVecs)
 	workDim := int(hdr.WorkDim)
+	bits := int(hdr.Bits)
+	if bits <= 0 || bits > 8 {
+		bits = 8
+	}
 
 	// Validate section bounds.
-	indicesEnd := fileHeaderSize + numVecs*workDim
+	packedRowSize := codec.PackedSize(workDim, bits)
+	indicesEnd := fileHeaderSize + numVecs*packedRowSize
 	normsEnd := int(hdr.NormsOff) + numVecs*4
 	if indicesEnd > len(data) || normsEnd > len(data) {
 		_ = release()
@@ -220,7 +226,7 @@ func Open(path string) (*Store, error) {
 	// Reconstruct quantizer from header config.
 	cfg := tqdb.StoreConfig{
 		Dim:         int(hdr.Dim),
-		Bits:        int(hdr.Bits),
+		Bits:        bits,
 		Rotation:    tqdb.RotationType(hdr.Rotation),
 		Seed:        hdr.Seed,
 		UseExactPDF: hdr.UseExact != 0,
@@ -231,8 +237,19 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("tqdb: reconstruct quantizer: %w", err)
 	}
 
-	// Slice indices directly from data (zero-copy from mmap).
-	allIndices := data[fileHeaderSize:indicesEnd]
+	// Unpack indices from bit-packed storage to uint8 for search.
+	var allIndices []byte
+	if bits == 8 {
+		// Zero-copy from mmap.
+		allIndices = data[fileHeaderSize:indicesEnd]
+	} else {
+		// Unpack to uint8 for the search loop.
+		allIndices = make([]byte, numVecs*workDim)
+		for i := range numVecs {
+			packed := data[fileHeaderSize+i*packedRowSize : fileHeaderSize+i*packedRowSize+packedRowSize]
+			codec.UnpackIndicesTo(packed, allIndices[i*workDim:i*workDim+workDim], workDim, bits)
+		}
+	}
 
 	// Decode norms into []float32 (for dequantization; not used in search ranking).
 	norms := decodeFloat32s(data[hdr.NormsOff:], numVecs)
