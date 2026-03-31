@@ -10,7 +10,7 @@ import (
 
 // Comparative benchmarks: Brute-force vs IVF vs HNSW on the same data.
 
-func setupCollectionN(b *testing.B, n, dim, bits int) (*Collection, []float64) {
+func setupCollectionN(b *testing.B, n, dim, bits int) (*Collection, []float64) { //nolint:unparam // dim varies in intent
 	b.Helper()
 	cfg := tqdb.Config{Dim: dim, Bits: bits, Rotation: tqdb.RotationHadamard}
 	coll, _ := NewCollection(cfg)

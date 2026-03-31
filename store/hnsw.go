@@ -265,6 +265,7 @@ func (h *hnswIndex) putVisitedSet(vs *visitedSet) {
 }
 
 // searchLayerPooled is searchLayer with an externally-provided visited set.
+// prefetchVec optionally returns the float32 vector for a node (for PRFM prefetch).
 func (h *hnswIndex) searchLayerPooled(entryPoints []candidate, ef, level int, distFunc func(a, b int) float32, visited *visitedSet) []candidate {
 	for _, ep := range entryPoints {
 		visited.Visit(ep.id)

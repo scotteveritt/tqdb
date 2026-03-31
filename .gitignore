@@ -28,3 +28,7 @@ bench/results/
 scotteveritt.github.io
 store.test
 tqdb-annbench
+kvcache.test
+score_loop.o
+*.test
+*.o

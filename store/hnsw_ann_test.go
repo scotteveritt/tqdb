@@ -74,7 +74,7 @@ func TestANN_HNSW_vs_BruteForce(t *testing.T) {
 					hits := 0
 					for _, r := range results {
 						var idx int
-						fmt.Sscanf(r.ID, "%d", &idx)
+						_ = fmt.Sscanf(r.ID, "%d", &idx)
 						if truthSet[idx] {
 							hits++
 						}
@@ -101,7 +101,7 @@ func TestANN_HNSW_vs_BruteForce(t *testing.T) {
 				hits := 0
 				for _, r := range results {
 					var idx int
-					fmt.Sscanf(r.ID, "%d", &idx)
+					_ = fmt.Sscanf(r.ID, "%d", &idx)
 					if truthSet[idx] {
 						hits++
 					}
