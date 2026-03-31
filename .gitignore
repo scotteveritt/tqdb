@@ -28,3 +28,5 @@ bench/results/
 scotteveritt.github.io
 store.test
 tqdb-annbench
+*.test
+*.o
