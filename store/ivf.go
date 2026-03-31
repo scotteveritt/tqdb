@@ -3,6 +3,8 @@ package store
 import (
 	"math"
 	"math/rand/v2"
+
+	"github.com/scotteveritt/tqdb/internal/distancer"
 )
 
 // ivfIndex holds IVF (Inverted File) partitions for approximate nearest neighbor search.
@@ -283,12 +285,7 @@ func nearestCentroid(vec []float64, centroids [][]float64) int {
 	best := 0
 	bestDot := -math.MaxFloat64
 	for p, c := range centroids {
-		var dot float64
-		for j := range vec {
-			if j < len(c) {
-				dot += vec[j] * c[j]
-			}
-		}
+		dot := distancer.DotF64(vec[:len(c)], c)
 		if dot > bestDot {
 			bestDot = dot
 			best = p
