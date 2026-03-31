@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.1](https://github.com/scotteveritt/tqdb/compare/v0.4.0...v0.4.1) (2026-03-31)
+
+
+### Features
+
+* auto index selection (IndexAuto) + scale benchmark data in README ([6bbbf6d](https://github.com/scotteveritt/tqdb/commit/6bbbf6dff8fbba09cb362f0f8ac10b476c6f327b))
+* HNSW graph index + NEON assembly distance kernels ([#4](https://github.com/scotteveritt/tqdb/issues/4)) ([9feaab0](https://github.com/scotteveritt/tqdb/commit/9feaab0b38a4aebc7397aad83827a62695c8c679))
+* incremental index maintenance for HNSW, IVF, and Delete ([10fa771](https://github.com/scotteveritt/tqdb/commit/10fa77160d5ad4eaa13cc8f79493984105f122e1))
+
+
+### Bug Fixes
+
+* check Delete error return (errcheck lint) ([d82949e](https://github.com/scotteveritt/tqdb/commit/d82949edc70b4c683265c88a45ae280ae73392f8))
+* lint errors (errcheck, unparam) and gitignore cleanup ([59f6220](https://github.com/scotteveritt/tqdb/commit/59f622071799f658aca3258749e36683e47b7c51))
+* skip expensive HNSW tests in CI (-short), remove plans/ from repo ([4139496](https://github.com/scotteveritt/tqdb/commit/413949605e5c3a803fab57a6170aaea78fa93eef))
+
 ## [0.4.0](https://github.com/scotteveritt/tqdb/compare/v0.3.0...v0.4.0) (2026-03-30)
 
 
