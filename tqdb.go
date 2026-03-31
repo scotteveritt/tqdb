@@ -85,8 +85,10 @@ type QueryOptions struct {
 type IndexType int
 
 const (
-	IndexIVF  IndexType = iota // ScaNN-style IVF partitioning (default)
+	IndexAuto IndexType = iota // Auto-select based on N and d (default)
+	IndexIVF                   // ScaNN-style IVF partitioning
 	IndexHNSW                  // Hierarchical Navigable Small World graph
+	IndexNone                  // No ANN index (brute-force only, filter indexes still built)
 )
 
 // IndexConfig controls index creation (VS2-aligned).

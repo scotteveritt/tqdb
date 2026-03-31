@@ -353,8 +353,18 @@ func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 		c.filterIdx = idx
 	}
 
+	// Resolve auto index type.
+	indexType := cfg.Type
+	if indexType == tqdb.IndexAuto {
+		if n < 10_000 {
+			indexType = tqdb.IndexNone
+		} else {
+			indexType = tqdb.IndexIVF
+		}
+	}
+
 	// Build ANN index.
-	switch cfg.Type {
+	switch indexType {
 	case tqdb.IndexHNSW:
 		// HNSW graph index over quantized vectors.
 		// Precompute dequantized float32 vectors for NEON-accelerated distance.
@@ -389,10 +399,12 @@ func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 		c.hnswIdx = h
 		c.hnswVecs = decodedVecs
 
-	default:
+	case tqdb.IndexNone:
+		// No ANN index. Filter indexes were already built above.
+
+	case tqdb.IndexIVF:
 		// IVF partitions (ScaNN-style k-means over rotated centroids).
-		// Skip for very small collections, or when explicitly disabled.
-		if n >= 100 && !cfg.SkipIVF {
+		if n >= 100 {
 			numPartitions := cfg.NumPartitions
 			if numPartitions <= 0 {
 				numPartitions = int(math.Sqrt(float64(n)))

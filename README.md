@@ -77,17 +77,10 @@ coll, _ := store.NewCollection(tqdb.Config{
 })
 coll.Add("id", vec, data)
 
-// Build HNSW graph index (sub-linear search, ~97% recall)
+// Build index (auto-selects IVF for N >= 10K, brute-force otherwise)
 coll.CreateIndex(tqdb.IndexConfig{
-    Type:           tqdb.IndexHNSW,
-    M:              16,
-    EfConstruction: 200,
-    FilterFields:   []string{"repo", "language"},
-})
-
-results := coll.SearchWithOptions(query, tqdb.SearchOptions{
-    TopK: 10,
-    Ef:   100, // higher = better recall, slower
+    FilterFields: []string{"repo", "language"},
+    // Type: tqdb.IndexAuto (default), tqdb.IndexIVF, tqdb.IndexHNSW, tqdb.IndexNone
 })
 ```
 
@@ -107,21 +100,24 @@ All measurements on Apple M4 Pro with NEON acceleration.
 
 ### Search Performance
 
-**25K vectors, d=3072 (Gemini embeddings):**
+**d=128, 8-bit:**
 
-| Mode | p50 | QPS |
-|------|-----|-----|
-| Brute-force | **700 us** | **1,467** |
+| N | Brute-force | IVF | HNSW |
+|---|------------|-----|------|
+| 10K | 2,495 QPS | **19,522 QPS** | 5,358 QPS |
+| 50K | 471 QPS | **4,222 QPS** | 2,321 QPS |
+| 100K | 245 QPS | **2,447 QPS** | 1,648 QPS |
 
-**10K vectors, d=128:**
+**d=768, 8-bit:**
 
-| Mode | Recall@10 | p50 | QPS |
-|------|-----------|-----|-----|
-| HNSW | ~97% | 81 us | **12,346** |
-| Brute-force | ~99% | 399 us | 2,505 |
+| N | Brute-force | IVF | HNSW |
+|---|------------|-----|------|
+| 10K | 316 QPS | **2,474 QPS** | 843 QPS |
+| 50K | 60 QPS | **723 QPS** | 518 QPS |
+| 100K | 32 QPS | 432 QPS | **468 QPS** |
 
-HNSW shines at lower dimensions where per-distance cost is cheap. At d=3072,
-brute-force is fast enough that graph traversal overhead doesn't help until 100K+ vectors.
+IVF wins at most scales. HNSW catches up at 100K+ where O(log N) beats O(sqrt(N)).
+Auto mode (`IndexAuto`, the default) selects IVF for N >= 10K, brute-force below.
 
 ### vs chromem-go (25K vectors, d=3072)
 
