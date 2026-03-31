@@ -106,7 +106,9 @@ func TestIncrementalHNSW_DeleteAfterIndex(t *testing.T) {
 	}
 
 	// Delete target.
-	coll.Delete("target")
+	if err := coll.Delete("target"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Search again - target should NOT appear.
 	results = coll.SearchWithOptions(target, tqdb.SearchOptions{TopK: 5, Ef: 200})
