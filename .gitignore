@@ -30,3 +30,4 @@ store.test
 tqdb-annbench
 *.test
 *.o
+plans/

@@ -70,6 +70,9 @@ func TestHNSW_NeedleInHaystack(t *testing.T) {
 }
 
 func TestHNSW_RecallAtK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running HNSW recall test")
+	}
 	// Measure recall@10 over multiple queries.
 	rng := rand.New(rand.NewPCG(99, 0))
 	dim := 64
@@ -138,6 +141,9 @@ func TestHNSW_RecallAtK(t *testing.T) {
 // --- Integration: HNSW with quantized Collection ---
 
 func TestHNSW_WithCollection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running HNSW collection test")
+	}
 	dim := 64
 	n := 2000
 	k := 10

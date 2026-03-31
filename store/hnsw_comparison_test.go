@@ -66,6 +66,9 @@ func BenchmarkCompare_HNSW_50K_d128(b *testing.B) {
 // --- Recall comparison ---
 
 func TestCompare_Recall_10K_d128(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running comparison test")
+	}
 	dim := 128
 	n := 10_000
 	k := 10

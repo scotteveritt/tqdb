@@ -14,6 +14,9 @@ import (
 // ANN benchmark: measures recall@10 and QPS for HNSW vs brute-force
 // on synthetic data at various scales, matching standard ANN benchmark methodology.
 func TestANN_HNSW_vs_BruteForce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping long-running HNSW ANN benchmark")
+	}
 	for _, tc := range []struct {
 		n, dim, bits int
 	}{
