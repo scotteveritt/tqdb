@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/internal/distancer"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
 	"github.com/scotteveritt/tqdb/quantize"
 )
@@ -45,6 +46,7 @@ type Collection struct {
 	filterIdx *filterIndex
 	ivfIdx    *ivfIndex
 	hnswIdx   *hnswIndex
+	hnswVecs  []float32 // precomputed dequantized vectors for HNSW NEON distance
 }
 
 // filterIndex provides O(1) lookup for Eq/In filter operations.
@@ -355,18 +357,22 @@ func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 	switch cfg.Type {
 	case tqdb.IndexHNSW:
 		// HNSW graph index over quantized vectors.
+		// Precompute dequantized float32 vectors for NEON-accelerated distance.
 		centroids32 := c.quantizer.Codebook().Centroids32
 		d := c.dim
 		allIdx := c.allIndices
 
-		distFunc := func(a, b int) float32 {
-			idxA := allIdx[a*d : a*d+d]
-			idxB := allIdx[b*d : b*d+d]
-			var dot float32
+		// Materialize float32 vectors: decodedVecs[i*d : (i+1)*d] = centroids32[indices[j]]
+		decodedVecs := make([]float32, n*d)
+		for i := range n {
+			off := i * d
 			for j := range d {
-				dot += centroids32[idxA[j]] * centroids32[idxB[j]]
+				decodedVecs[off+j] = centroids32[allIdx[off+j]]
 			}
-			return -dot // negative inner product: lower = more similar
+		}
+
+		distFunc := func(a, b int) float32 {
+			return distancer.NegDot(decodedVecs[a*d:a*d+d], decodedVecs[b*d:b*d+d])
 		}
 
 		h := newHNSW(hnswConfig{
@@ -379,7 +385,9 @@ func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 			}
 			h.Insert(i, distFunc)
 		}
+		// Store decoded vectors for search-time distance computation.
 		c.hnswIdx = h
+		c.hnswVecs = decodedVecs
 
 	default:
 		// IVF partitions (ScaNN-style k-means over rotated centroids).
@@ -678,7 +686,7 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 
 	switch {
 	case c.hnswIdx != nil:
-		// HNSW path: graph-based search.
+		// HNSW path: graph-based search with NEON-accelerated distance.
 		ef := opts.Ef
 		if ef <= 0 {
 			ef = effectiveK * 10 // default: 10x topK for quantized asymmetric scoring
@@ -687,13 +695,19 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 			}
 		}
 
+		// Use precomputed decoded vectors + NEON for query-to-vector distance.
+		hnswVecs := c.hnswVecs
 		distToQuery := func(nodeID int) float32 {
+			if hnswVecs != nil {
+				return distancer.NegDot(qr32, hnswVecs[nodeID*d:nodeID*d+d])
+			}
+			// Fallback: gather from centroids (no NEON benefit).
 			idx := allIdx[nodeID*d : nodeID*d+d]
 			var dot float32
 			for j := range d {
 				dot += qr32[j] * centroids32[idx[j]]
 			}
-			return -dot // negative: HNSW minimizes distance
+			return -dot
 		}
 
 		hnswResults := c.hnswIdx.Search(distToQuery, effectiveK, ef)
