@@ -701,7 +701,6 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 			if hnswVecs != nil {
 				return distancer.NegDot(qr32, hnswVecs[nodeID*d:nodeID*d+d])
 			}
-			// Fallback: gather from centroids (no NEON benefit).
 			idx := allIdx[nodeID*d : nodeID*d+d]
 			var dot float32
 			for j := range d {

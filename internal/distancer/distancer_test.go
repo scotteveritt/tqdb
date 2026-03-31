@@ -108,3 +108,23 @@ func closeF32(a, b float32) bool {
 	}
 	return diff/avg < 1e-4 // float32 has ~7 digits, allow 0.01% error
 }
+
+func BenchmarkDot_Prefetch_128(b *testing.B) {
+	rng := rand.New(rand.NewPCG(42, 0))
+	a, c := randF32(128, rng), randF32(128, rng)
+	next := randF32(128, rng)
+	b.ResetTimer()
+	for range b.N {
+		_ = DotPrefetch(a, c, next, next)
+	}
+}
+
+func BenchmarkDot_Prefetch_3072(b *testing.B) {
+	rng := rand.New(rand.NewPCG(42, 0))
+	a, c := randF32(3072, rng), randF32(3072, rng)
+	next := randF32(3072, rng)
+	b.ResetTimer()
+	for range b.N {
+		_ = DotPrefetch(a, c, next, next)
+	}
+}

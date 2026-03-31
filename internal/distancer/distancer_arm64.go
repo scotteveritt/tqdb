@@ -12,6 +12,7 @@ func init() {
 		dotImpl = asm.DotNeon
 		negDotImpl = asm.NegDotNeon
 		l2Impl = asm.L2Neon
+		dotPrefetchImpl = asm.DotPrefetchNeon
 		dotF64Impl = asm.DotF64
 		vecMulF64Impl = asm.VecMulF64
 		vecScaleF64Impl = asm.VecScaleF64
