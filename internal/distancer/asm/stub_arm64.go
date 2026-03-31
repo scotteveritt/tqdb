@@ -105,6 +105,35 @@ func DotF64(x, y []float64) float64 {
 	return res
 }
 
+// DotPrefetchNeon computes dot product while prefetching the next pair of vectors.
+// Set nextA/nextB to nil on the last iteration.
+func DotPrefetchNeon(x, y []float32, nextA, nextB []float32) float32 {
+	n := len(x)
+	if n < 16 {
+		var s float32
+		for i := range x {
+			s += x[i] * y[i]
+		}
+		return s
+	}
+	var res float32
+	var na, nb unsafe.Pointer
+	if len(nextA) > 0 {
+		na = unsafe.Pointer(unsafe.SliceData(nextA))
+	}
+	if len(nextB) > 0 {
+		nb = unsafe.Pointer(unsafe.SliceData(nextB))
+	}
+	dot_prefetch_neon(
+		unsafe.Pointer(unsafe.SliceData(x)),
+		unsafe.Pointer(unsafe.SliceData(y)),
+		unsafe.Pointer(&res),
+		unsafe.Pointer(&n),
+		na, nb,
+	)
+	return res
+}
+
 // L2Neon computes L2 squared distance using NEON.
 func L2Neon(x, y []float32) float32 {
 	n := len(x)
