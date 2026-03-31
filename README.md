@@ -4,7 +4,7 @@
 
 Store vectors compressed. Search without decompressing. Open in milliseconds.
 
-Built on Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) with Hadamard rotation and IVF partitioning.
+Built on Google's [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026) with Hadamard rotation, HNSW graph indexing, and NEON-accelerated distance kernels.
 
 ## Install
 
@@ -69,9 +69,7 @@ results := s.SearchWithOptions(query, tqdb.SearchOptions{
 })
 ```
 
-### In-Memory Collection
-
-For applications that need Add/Delete/Upsert during a session:
+### In-Memory Collection with HNSW
 
 ```go
 coll, _ := store.NewCollection(tqdb.Config{
@@ -79,17 +77,17 @@ coll, _ := store.NewCollection(tqdb.Config{
 })
 coll.Add("id", vec, data)
 
-// HNSW index for fast search (or use default brute-force for < 10K vectors)
+// Build HNSW graph index (sub-linear search, ~97% recall)
 coll.CreateIndex(tqdb.IndexConfig{
-    Type:           tqdb.IndexHNSW,  // or IndexIVF for partition-based
-    M:              16,              // edges per node (default: 16)
-    EfConstruction: 200,             // build-time beam width
+    Type:           tqdb.IndexHNSW,
+    M:              16,
+    EfConstruction: 200,
     FilterFields:   []string{"repo", "language"},
 })
 
 results := coll.SearchWithOptions(query, tqdb.SearchOptions{
     TopK: 10,
-    Ef:   100, // search-time beam width (higher = better recall)
+    Ef:   100, // higher = better recall, slower
 })
 ```
 
@@ -98,52 +96,57 @@ results := coll.SearchWithOptions(query, tqdb.SearchOptions{
 1. **Normalize** the vector to unit length, store the magnitude separately
 2. **Rotate** via Randomized Walsh-Hadamard Transform (O(d log d), 65 KB memory)
 3. **Quantize** each coordinate with a Lloyd-Max codebook precomputed from the known Gaussian distribution (no training data needed)
-4. **Search** by rotating the query once, then computing inner products via centroid table lookup (no decompression)
+4. **Index** via HNSW graph for sub-linear search, or brute-force for small collections
+5. **Search** by rotating the query once, then traversing the graph with NEON-accelerated distance (no decompression)
 
 The codebook depends only on (dimension, bits), not on your data. This makes quantization data-oblivious: you can add vectors one at a time without retraining.
 
 ## Benchmarks
 
-All measurements on Apple M4 Pro, 25K Gemini embeddings, d=3072.
+All measurements on Apple M4 Pro with NEON acceleration.
 
-### Search Performance
+### Search Performance (10K vectors, d=128, 8-bit)
 
-| Mode | Recall@10 | p50 | QPS |
-|------|-----------|-----|-----|
-| **HNSW (8-bit, NEON)** | **~97%** | **81 us** | **12,346** |
-| Brute-force (8-bit) | ~99% | 2.7ms | 379 |
-| IVF + rescore | ~92% | 9.4ms | 106 |
+| Mode | Recall@10 | Latency | QPS |
+|------|-----------|---------|-----|
+| **HNSW** | **~97%** | **81 us** | **12,346** |
+| Brute-force | ~99% | 399 us | 2,505 |
 
-HNSW uses GoAT-generated ARM64 NEON assembly (4-5x faster dot products).
-On x86, pure Go fallbacks are used automatically.
+HNSW scales sub-linearly: at 50K vectors, brute-force slows 5x but HNSW only 15%.
 
-### vs chromem-go
+### vs chromem-go (25K vectors, d=3072)
 
 | Metric | chromem-go | tqdb | Improvement |
 |--------|-----------|------|-------------|
 | Startup | 6.2s | **10ms** | **620x** |
-| Search (HNSW) | 72ms | **81 us** | **889x** |
 | Search (brute-force) | 72ms | **2.7ms** | **27x** |
 | Disk | 397 MB (25K files) | **140 MB** (1 file) | **2.8x** |
 | Recall@10 | 100% (exact) | **~99%** (8-bit) | -1% |
 
+### NEON Assembly Acceleration
+
+GoAT-generated ARM64 NEON kernels for distance computation:
+
+| Operation | Pure Go | NEON | Speedup |
+|-----------|---------|------|---------|
+| Dot product (f32, d=128) | 33.8 ns | 8.6 ns | **3.9x** |
+| Dot product (f32, d=3072) | 701 ns | 142 ns | **5.0x** |
+| L2 distance (f32, d=128) | 33.6 ns | 8.5 ns | **4.0x** |
+
+On x86, pure Go fallbacks are used automatically.
+
 ### Recall by Bit-Width
 
-| Bits | Recall@10 (d=3072) | Recall@10 (d=128) | Bytes/Vector | Compression |
-|------|-------------------|-------------------|-------------|-------------|
-| 3 | 78% | 76% | d * 3/8 | 21x |
-| 4 | 89% | 86% | d * 4/8 | 16x |
-| 5 | 93% | 93% | d * 5/8 | 13x |
-| 6 | 96% | 96% | d * 6/8 | 11x |
-| **8** | **~99%** | **99%** | **d** | **8x** |
+| Bits | Recall@10 (d=3072) | Recall@10 (d=128) | Compression |
+|------|-------------------|-------------------|-------------|
+| 4 | 89% | 86% | 16x |
+| 5 | 93% | 93% | 13x |
+| **8** | **~99%** | **99%** | **8x** |
 
-Default is 8-bit. With the current uint8 storage format, all bit-widths use the
-same bytes on disk (one byte per coordinate). The compression ratios above apply
-when bit-packing is enabled in the .tq format (4-bit packs 2 indices per byte).
+Default is 8-bit. Indices are bit-packed in the .tq format (4-bit stores
+2 indices per byte).
 
 ### Standard ANN Benchmarks
-
-Tested on canonical datasets from [ann-benchmarks](https://github.com/erikbern/ann-benchmarks):
 
 | Dataset | Type | d | N | 4-bit Recall@10 | 8-bit Recall@10 |
 |---------|------|---|---|-----------------|-----------------|
@@ -151,22 +154,7 @@ Tested on canonical datasets from [ann-benchmarks](https://github.com/erikbern/a
 | GloVe-100 | Learned | 100 | 1.18M | 80.8% | 96.6% |
 | SIFT-128 | SIFT descriptors | 128 | 1M | 50.9% | 89.3% |
 
-4-bit TurboQuant works best on modern learned embeddings (Gemini, GloVe, OpenAI).
-SIFT descriptors have distributional properties that don't match the Gaussian
-codebook assumption, resulting in lower recall at low bit-widths.
-
-## Comparison with TurboQuant Paper
-
-We changed two things relative to the paper's approach, and measured each independently:
-
-| Config | Rotation | Bit Allocation | Recall@10 (d=3072) |
-|--------|----------|---------------|-------------------|
-| Paper | QR | Prod (3+1) | ~85% |
-| tqdb (rotation only) | **Hadamard** | Prod (3+1) | 89.2% |
-| tqdb (both) | **Hadamard** | **MSE-only (4+0)** | **91.9%** |
-
-Hadamard rotation contributes ~4.3% and MSE-only bit allocation ~2.6%.
-Memory: 65 KB (Hadamard) vs 75 MB (QR).
+TurboQuant works best on modern learned embeddings (Gemini, GloVe, OpenAI).
 
 ## Features
 
@@ -175,24 +163,23 @@ Memory: 65 KB (Hadamard) vs 75 MB (QR).
 Composable filters matching [Google Vector Search 2.0](https://docs.cloud.google.com/vertex-ai/docs/vector-search-2/query-search/search) syntax:
 
 ```go
-tqdb.Eq("repo", "tqdb")                    // exact match
-tqdb.In("lang", "go", "rust", "python")    // set membership
-tqdb.Gt("stars", 100.0)                    // numeric comparison
-tqdb.And(filter1, filter2)                  // intersection
-tqdb.Or(filter1, filter2)                   // union
-tqdb.Contains("content", "vector")          // substring
+tqdb.Eq("repo", "tqdb")
+tqdb.In("lang", "go", "rust", "python")
+tqdb.Gt("stars", 100.0)
+tqdb.And(filter1, filter2)
+tqdb.Or(filter1, filter2)
+tqdb.Contains("content", "vector")
 ```
 
-Fields listed in `IndexConfig.FilterFields` get inverted indexes for O(1) lookup.
-
-### IVF Partitioning
+### CRUD
 
 ```go
-coll.CreateIndex(tqdb.IndexConfig{
-    FilterFields: []string{"repo", "language"},
-    // IVF auto-tuned: sqrt(N) partitions, sqrt(P) probes
-    // Set SkipIVF: true to build only filter indexes (faster startup)
-})
+coll.Add("id", vec, data)
+coll.AddDocument(ctx, doc)                  // auto-embed if EmbedFunc set
+coll.AddDocuments(ctx, docs, concurrency)   // batch with concurrent embedding
+coll.Upsert("id", vec, data)
+coll.Delete("id-1", "id-2")
+doc, ok := coll.GetByID("id")
 ```
 
 ### File Format
@@ -200,42 +187,11 @@ coll.CreateIndex(tqdb.IndexConfig{
 The `.tq` format is a single columnar file, memory-mapped for instant startup:
 
 ```
-[Header 64B] [Indices N*packedRow] [Norms N*4B] [IDs] [Data JSON] [Contents]
+[Header 64B] [Indices] [Norms] [IDs] [Data] [Contents] [HNSW Graph]
 ```
 
-Indices are bit-packed (4-bit: 2 per byte, 8-bit: 1 per byte). The header
-stores dimension, bits, rotation type, and section offsets. IDs, metadata, and
-content are lazily loaded on first access.
-
-### CRUD Operations
-
-```go
-coll.Add("id", vec, data)                   // skip if duplicate
-coll.AddDocument(ctx, doc)                  // auto-embed if EmbedFunc set
-coll.AddDocuments(ctx, docs, concurrency)   // batch with concurrent embedding
-coll.Upsert("id", vec, data)               // replace if exists
-coll.Delete("id-1", "id-2")
-doc, ok := coll.GetByID("id")
-ids := coll.ListIDs()
-```
-
-### Persistence Roundtrip
-
-```go
-// Save Collection to .tq file
-s, _ := store.Create("index.tq", cfg)
-coll.ForEach(func(id string, indices []uint8, norm float32, content string, data map[string]any) {
-    s.AddRaw(id, indices, norm, content, data)
-})
-s.Close()
-
-// Load .tq file back into Collection
-s, _ = store.Open("index.tq")
-s.ForEachCompressed(func(id string, indices []uint8, norm float32, content string, data map[string]any) {
-    coll.AddRawDocument(id, indices, norm, content, data)
-})
-s.Close()
-```
+Indices are bit-packed. The HNSW graph section is optional (~134 bytes/node).
+IDs, metadata, and content are lazily loaded on first access.
 
 ## License
 
