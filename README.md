@@ -105,21 +105,30 @@ The codebook depends only on (dimension, bits), not on your data. This makes qua
 
 All measurements on Apple M4 Pro with NEON acceleration.
 
-### Search Performance (10K vectors, d=128, 8-bit)
+### Search Performance
 
-| Mode | Recall@10 | Latency | QPS |
-|------|-----------|---------|-----|
-| **HNSW** | **~97%** | **81 us** | **12,346** |
+**25K vectors, d=3072 (Gemini embeddings):**
+
+| Mode | p50 | QPS |
+|------|-----|-----|
+| Brute-force | **700 us** | **1,467** |
+
+**10K vectors, d=128:**
+
+| Mode | Recall@10 | p50 | QPS |
+|------|-----------|-----|-----|
+| HNSW | ~97% | 81 us | **12,346** |
 | Brute-force | ~99% | 399 us | 2,505 |
 
-HNSW scales sub-linearly: at 50K vectors, brute-force slows 5x but HNSW only 15%.
+HNSW shines at lower dimensions where per-distance cost is cheap. At d=3072,
+brute-force is fast enough that graph traversal overhead doesn't help until 100K+ vectors.
 
 ### vs chromem-go (25K vectors, d=3072)
 
 | Metric | chromem-go | tqdb | Improvement |
 |--------|-----------|------|-------------|
 | Startup | 6.2s | **10ms** | **620x** |
-| Search (brute-force) | 72ms | **2.7ms** | **27x** |
+| Search | 72ms | **700 us** | **103x** |
 | Disk | 397 MB (25K files) | **140 MB** (1 file) | **2.8x** |
 | Recall@10 | 100% (exact) | **~99%** (8-bit) | -1% |
 
@@ -174,12 +183,15 @@ tqdb.Contains("content", "vector")
 ### CRUD
 
 ```go
-coll.Add("id", vec, data)
-coll.AddDocument(ctx, doc)                  // auto-embed if EmbedFunc set
-coll.AddDocuments(ctx, docs, concurrency)   // batch with concurrent embedding
-coll.Upsert("id", vec, data)
+// Collection (in-memory, supports all operations)
+coll.Add("id", vec, data)                   // skip if duplicate
+coll.Upsert("id", vec, data)               // replace if exists
 coll.Delete("id-1", "id-2")
+coll.AddDocument(ctx, doc)                  // auto-embed via EmbedFunc
 doc, ok := coll.GetByID("id")
+
+// Store (file-backed, write-once)
+s.Add(tqdb.Document{ID: "id", Embedding: vec, Content: "...", Data: data})
 ```
 
 ### File Format
