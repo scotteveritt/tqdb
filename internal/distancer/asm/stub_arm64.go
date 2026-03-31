@@ -49,6 +49,62 @@ func NegDotNeon(x, y []float32) float32 {
 	return res
 }
 
+// VecMulF64 computes dst[i] = a[i] * b[i] for float64 slices.
+// Used for Hadamard sign flips.
+func VecMulF64(dst, a, b []float64) {
+	n := len(a)
+	if n < 8 {
+		for i := range a {
+			dst[i] = a[i] * b[i]
+		}
+		return
+	}
+	vec_mul_f64(
+		unsafe.Pointer(unsafe.SliceData(dst)),
+		unsafe.Pointer(unsafe.SliceData(a)),
+		unsafe.Pointer(unsafe.SliceData(b)),
+		unsafe.Pointer(&n),
+	)
+}
+
+// VecScaleF64 computes dst[i] = a[i] * scalar for float64 slices.
+// Used for normalization.
+func VecScaleF64(dst, a []float64, scalar float64) {
+	n := len(a)
+	if n < 8 {
+		for i := range a {
+			dst[i] = a[i] * scalar
+		}
+		return
+	}
+	vec_scale_f64(
+		unsafe.Pointer(unsafe.SliceData(dst)),
+		unsafe.Pointer(unsafe.SliceData(a)),
+		unsafe.Pointer(&scalar),
+		unsafe.Pointer(&n),
+	)
+}
+
+// DotF64 computes the dot product of two float64 slices.
+func DotF64(x, y []float64) float64 {
+	n := len(x)
+	if n < 8 {
+		var s float64
+		for i := range x {
+			s += x[i] * y[i]
+		}
+		return s
+	}
+	var res float64
+	dot_f64(
+		unsafe.Pointer(unsafe.SliceData(x)),
+		unsafe.Pointer(unsafe.SliceData(y)),
+		unsafe.Pointer(&res),
+		unsafe.Pointer(&n),
+	)
+	return res
+}
+
 // L2Neon computes L2 squared distance using NEON.
 func L2Neon(x, y []float32) float32 {
 	n := len(x)
