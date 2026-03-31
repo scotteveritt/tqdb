@@ -78,10 +78,19 @@ coll, _ := store.NewCollection(tqdb.Config{
     Dim: 3072, Bits: 8, Rotation: tqdb.RotationHadamard,
 })
 coll.Add("id", vec, data)
+
+// HNSW index for fast search (or use default brute-force for < 10K vectors)
 coll.CreateIndex(tqdb.IndexConfig{
-    FilterFields: []string{"repo", "language"},
+    Type:           tqdb.IndexHNSW,  // or IndexIVF for partition-based
+    M:              16,              // edges per node (default: 16)
+    EfConstruction: 200,             // build-time beam width
+    FilterFields:   []string{"repo", "language"},
 })
-results := coll.Search(query, 10)
+
+results := coll.SearchWithOptions(query, tqdb.SearchOptions{
+    TopK: 10,
+    Ef:   100, // search-time beam width (higher = better recall)
+})
 ```
 
 ## How It Works
@@ -101,16 +110,20 @@ All measurements on Apple M4 Pro, 25K Gemini embeddings, d=3072.
 
 | Mode | Recall@10 | p50 | QPS |
 |------|-----------|-----|-----|
+| **HNSW (8-bit, NEON)** | **~97%** | **81 us** | **12,346** |
 | Brute-force (8-bit) | ~99% | 2.7ms | 379 |
-| Brute-force (4-bit) | ~89% | 2.7ms | 379 |
 | IVF + rescore | ~92% | 9.4ms | 106 |
+
+HNSW uses GoAT-generated ARM64 NEON assembly (4-5x faster dot products).
+On x86, pure Go fallbacks are used automatically.
 
 ### vs chromem-go
 
 | Metric | chromem-go | tqdb | Improvement |
 |--------|-----------|------|-------------|
 | Startup | 6.2s | **10ms** | **620x** |
-| Search | 72ms | **2.7ms** | **27x** |
+| Search (HNSW) | 72ms | **81 us** | **889x** |
+| Search (brute-force) | 72ms | **2.7ms** | **27x** |
 | Disk | 397 MB (25K files) | **140 MB** (1 file) | **2.8x** |
 | Recall@10 | 100% (exact) | **~99%** (8-bit) | -1% |
 
