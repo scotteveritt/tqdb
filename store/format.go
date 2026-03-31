@@ -40,8 +40,9 @@ type fileHeader struct {
 	NumVecs     uint32
 	NormsOff    uint32
 	IDsOff      uint32
-	DataOff     uint32 // was MetaOff in v1; now stores map[string]any JSON blobs
-	ContentsOff uint32 // NEW in v2: offset of contents section
+	DataOff     uint32
+	ContentsOff uint32
+	GraphOff    uint32 // 0 = no HNSW graph stored
 }
 
 // encodeHeader writes the 64-byte header to dst.
@@ -60,7 +61,8 @@ func encodeHeader(dst []byte, h *fileHeader) {
 	binary.LittleEndian.PutUint32(dst[28:32], h.IDsOff)
 	binary.LittleEndian.PutUint32(dst[32:36], h.DataOff)
 	binary.LittleEndian.PutUint32(dst[36:40], h.ContentsOff)
-	// bytes 40-63: reserved (leave zeroed)
+	binary.LittleEndian.PutUint32(dst[40:44], h.GraphOff)
+	// bytes 44-63: reserved
 }
 
 // decodeHeader reads and validates the 64-byte header.
@@ -86,6 +88,7 @@ func decodeHeader(src []byte) (fileHeader, error) {
 		IDsOff:      binary.LittleEndian.Uint32(src[28:32]),
 		DataOff:     binary.LittleEndian.Uint32(src[32:36]),
 		ContentsOff: binary.LittleEndian.Uint32(src[36:40]),
+		GraphOff:    binary.LittleEndian.Uint32(src[40:44]),
 	}
 	if h.WorkDim < h.Dim {
 		return fileHeader{}, fmt.Errorf("tqdb: workDim %d < dim %d", h.WorkDim, h.Dim)
@@ -134,7 +137,14 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 		contentsSize += 4 + len(c)
 	}
 
-	totalSize := int(contentsOff) + contentsSize
+	// Graph section (optional, after contents).
+	graphOff := uint32(0)
+	graphSize := len(buf.graphData)
+	if graphSize > 0 {
+		graphOff = contentsOff + uint32(contentsSize)
+	}
+
+	totalSize := int(contentsOff) + contentsSize + graphSize
 	data := make([]byte, totalSize)
 
 	// Header.
@@ -154,6 +164,7 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 		IDsOff:      idsOff,
 		DataOff:     dataOff,
 		ContentsOff: contentsOff,
+		GraphOff:    graphOff,
 	}
 	encodeHeader(data[:fileHeaderSize], hdr)
 
@@ -204,6 +215,11 @@ func encodeFile(cfg tqdb.StoreConfig, workDim int, buf *writeBuffer) []byte {
 		binary.LittleEndian.PutUint32(data[off:off+4], uint32(len(c)))
 		copy(data[off+4:], c)
 		off += 4 + len(c)
+	}
+
+	// Graph section (optional).
+	if graphSize > 0 {
+		copy(data[graphOff:], buf.graphData)
 	}
 
 	return data

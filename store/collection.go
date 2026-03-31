@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/scotteveritt/tqdb"
+	"github.com/scotteveritt/tqdb/internal/distancer"
 	"github.com/scotteveritt/tqdb/internal/mathutil"
 	"github.com/scotteveritt/tqdb/quantize"
 )
@@ -44,6 +45,8 @@ type Collection struct {
 	// Indexes (built by CreateIndex, nil until then).
 	filterIdx *filterIndex
 	ivfIdx    *ivfIndex
+	hnswIdx   *hnswIndex
+	hnswVecs  []float32 // precomputed dequantized vectors for HNSW NEON distance
 }
 
 // filterIndex provides O(1) lookup for Eq/In filter operations.
@@ -350,33 +353,71 @@ func (c *Collection) CreateIndex(cfg tqdb.IndexConfig) {
 		c.filterIdx = idx
 	}
 
-	// Build IVF partitions (ScaNN-style k-means over rotated centroids).
-	// Skip for very small collections, or when explicitly disabled.
-	if n >= 100 && !cfg.SkipIVF {
-		numPartitions := cfg.NumPartitions
-		if numPartitions <= 0 {
-			numPartitions = int(math.Sqrt(float64(n)))
-			if numPartitions < 4 {
-				numPartitions = 4
-			}
-		}
-		nProbe := cfg.NProbe
-		if nProbe <= 0 {
-			nProbe = int(math.Sqrt(float64(numPartitions)))
-			if nProbe < 1 {
-				nProbe = 1
+	// Build ANN index.
+	switch cfg.Type {
+	case tqdb.IndexHNSW:
+		// HNSW graph index over quantized vectors.
+		// Precompute dequantized float32 vectors for NEON-accelerated distance.
+		centroids32 := c.quantizer.Codebook().Centroids32
+		d := c.dim
+		allIdx := c.allIndices
+
+		// Materialize float32 vectors: decodedVecs[i*d : (i+1)*d] = centroids32[indices[j]]
+		decodedVecs := make([]float32, n*d)
+		for i := range n {
+			off := i * d
+			for j := range d {
+				decodedVecs[off+j] = centroids32[allIdx[off+j]]
 			}
 		}
 
-		c.ivfIdx = buildIVF(
-			c.allIndices,
-			c.quantizer.Codebook().Centroids,
-			c.dim,
-			n,
-			numPartitions,
-			nProbe,
-			c.deleted,
-		)
+		distFunc := func(a, b int) float32 {
+			return distancer.NegDot(decodedVecs[a*d:a*d+d], decodedVecs[b*d:b*d+d])
+		}
+
+		h := newHNSW(hnswConfig{
+			M:              cfg.M,
+			EfConstruction: cfg.EfConstruction,
+		})
+		for i := range n {
+			if c.deleted[i] {
+				continue
+			}
+			h.Insert(i, distFunc)
+		}
+		// Store decoded vectors for search-time distance computation.
+		c.hnswIdx = h
+		c.hnswVecs = decodedVecs
+
+	default:
+		// IVF partitions (ScaNN-style k-means over rotated centroids).
+		// Skip for very small collections, or when explicitly disabled.
+		if n >= 100 && !cfg.SkipIVF {
+			numPartitions := cfg.NumPartitions
+			if numPartitions <= 0 {
+				numPartitions = int(math.Sqrt(float64(n)))
+				if numPartitions < 4 {
+					numPartitions = 4
+				}
+			}
+			nProbe := cfg.NProbe
+			if nProbe <= 0 {
+				nProbe = int(math.Sqrt(float64(numPartitions)))
+				if nProbe < 1 {
+					nProbe = 1
+				}
+			}
+
+			c.ivfIdx = buildIVF(
+				c.allIndices,
+				c.quantizer.Codebook().Centroids,
+				c.dim,
+				n,
+				numPartitions,
+				nProbe,
+				c.deleted,
+			)
+		}
 	}
 }
 
@@ -644,6 +685,49 @@ func (c *Collection) searchInternal(query []float64, topK int, filterFn func(map
 	}
 
 	switch {
+	case c.hnswIdx != nil:
+		// HNSW path: graph-based search with NEON-accelerated distance.
+		ef := opts.Ef
+		if ef <= 0 {
+			ef = effectiveK * 10 // default: 10x topK for quantized asymmetric scoring
+			if ef < 100 {
+				ef = 100
+			}
+		}
+
+		// Use precomputed decoded vectors + NEON for query-to-vector distance.
+		hnswVecs := c.hnswVecs
+		distToQuery := func(nodeID int) float32 {
+			if hnswVecs != nil {
+				return distancer.NegDot(qr32, hnswVecs[nodeID*d:nodeID*d+d])
+			}
+			idx := allIdx[nodeID*d : nodeID*d+d]
+			var dot float32
+			for j := range d {
+				dot += qr32[j] * centroids32[idx[j]]
+			}
+			return -dot
+		}
+
+		hnswResults := c.hnswIdx.Search(distToQuery, effectiveK, ef)
+
+		// Convert HNSW results to topBuf.
+		for _, r := range hnswResults {
+			i := int(r.id)
+			if deleted[i] {
+				continue
+			}
+			// Apply filter if set.
+			if filterCands != nil {
+				if _, ok := filterCands[i]; !ok {
+					continue
+				}
+			} else if filterFn != nil && !filterFn(c.dataFields[i]) {
+				continue
+			}
+			insertTopK(i, float64(-r.dist)) // convert back to positive score
+		}
+
 	case c.ivfIdx != nil:
 		// IVF path: iterate partitions directly, no map allocation.
 		topPartitions := c.ivfIdx.findNearestPartitions(queryRotated, c.ivfIdx.scoreBuf)

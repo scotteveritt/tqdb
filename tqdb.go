@@ -72,6 +72,7 @@ type SearchOptions struct {
 	Offset   int     // skip first N results (pagination)
 	Filter   Filter  // data field filter
 	Rescore  int     // rescore top-N with exact dequantized distance (0 = disabled, recommended: 3×TopK)
+	Ef       int     // HNSW: search beam width (0 = auto, higher = better recall, slower)
 }
 
 // QueryOptions controls filter-only retrieval (VS2: QueryDataObjectsRequest).
@@ -80,12 +81,23 @@ type QueryOptions struct {
 	Filter   Filter // required
 }
 
+// IndexType selects the ANN index algorithm.
+type IndexType int
+
+const (
+	IndexIVF  IndexType = iota // ScaNN-style IVF partitioning (default)
+	IndexHNSW                  // Hierarchical Navigable Small World graph
+)
+
 // IndexConfig controls index creation (VS2-aligned).
 type IndexConfig struct {
-	FilterFields  []string // fields to build inverted indexes on
-	NumPartitions int      // IVF partitions (0 = auto √N)
-	NProbe        int      // partitions to search per query (0 = auto √NumPartitions)
-	SkipIVF       bool     // if true, only build filter indexes (no IVF partitioning)
+	FilterFields  []string  // fields to build inverted indexes on
+	Type          IndexType // index algorithm: IndexIVF (default) or IndexHNSW
+	NumPartitions int       // IVF: partitions (0 = auto √N)
+	NProbe        int       // IVF: partitions to search per query (0 = auto √NumPartitions)
+	SkipIVF       bool      // IVF: if true, only build filter indexes
+	M             int       // HNSW: max edges per layer (default 16)
+	EfConstruction int      // HNSW: build-time beam width (default 200)
 }
 
 // CompressedVector is the output of TurboQuantMSE.Quantize().

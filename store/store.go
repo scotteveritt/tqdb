@@ -57,6 +57,10 @@ type Store struct {
 	// IVF index (built lazily on first indexed search).
 	ivfOnce sync.Once
 	ivfIdx  *ivfIndex
+
+	// HNSW index (loaded from .tq file if present).
+	hnswIdx  *hnswIndex
+	hnswVecs []float32 // decoded float32 vectors for HNSW search
 }
 
 // writeBuffer accumulates vectors before flushing to disk.
@@ -66,6 +70,7 @@ type writeBuffer struct {
 	ids        []string
 	data       [][]byte  // raw JSON bytes per vector (map[string]any)
 	contents   []string  // document content per vector
+	graphData  []byte    // serialized HNSW graph (optional)
 }
 
 // Create creates a new store for writing. Call Add() to insert vectors,
@@ -254,7 +259,7 @@ func Open(path string) (*Store, error) {
 	// Decode norms into []float32 (for dequantization; not used in search ranking).
 	norms := decodeFloat32s(data[hdr.NormsOff:], numVecs)
 
-	return &Store{
+	st := &Store{
 		path:       path,
 		config:     cfg,
 		quantizer:  q,
@@ -266,7 +271,27 @@ func Open(path string) (*Store, error) {
 		norms:      norms,
 		numVecs:    numVecs,
 		header:     hdr,
-	}, nil
+	}
+
+	// Load HNSW graph if present.
+	if hdr.GraphOff > 0 && int(hdr.GraphOff) < len(data) {
+		h, err := UnmarshalHNSW(data[hdr.GraphOff:])
+		if err == nil {
+			st.hnswIdx = h
+			// Precompute decoded float32 vectors for NEON search.
+			centroids32 := q.Codebook().Centroids32
+			decoded := make([]float32, numVecs*workDim)
+			for i := range numVecs {
+				off := i * workDim
+				for j := range workDim {
+					decoded[off+j] = centroids32[allIndices[off+j]]
+				}
+			}
+			st.hnswVecs = decoded
+		}
+	}
+
+	return st, nil
 }
 
 // ensureIDsLoaded lazily parses the IDs, data, and contents sections.
@@ -558,6 +583,13 @@ func (s *Store) ForEachCompressed(fn func(id string, indices []uint8, norm float
 	d := s.workDim
 	for i := range s.numVecs {
 		fn(s.ids[i], s.allIndices[i*d:i*d+d], s.norms[i], s.contents[i], s.dataCache[i])
+	}
+}
+
+// SetGraph attaches serialized HNSW graph data to be written on Flush.
+func (s *Store) SetGraph(data []byte) {
+	if s.mode == modeWrite {
+		s.buf.graphData = data
 	}
 }
 

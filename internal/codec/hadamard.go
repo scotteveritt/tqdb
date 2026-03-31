@@ -3,6 +3,8 @@ package codec
 import (
 	"math"
 	"math/rand/v2"
+
+	"github.com/scotteveritt/tqdb/internal/distancer"
 )
 
 // HadamardRotator applies the Randomized Hadamard Transform:
@@ -70,20 +72,14 @@ func (h *HadamardRotator) Rotate(dst, src []float64) {
 		dst[i] = 0
 	}
 
-	// D₁: apply first random sign flip.
-	s1 := h.signs1
-	for i := range padD {
-		dst[i] *= s1[i]
-	}
+	// D₁: apply first random sign flip (NEON-accelerated).
+	distancer.VecMulF64(dst[:padD], dst[:padD], h.signs1)
 
 	// H̃: normalized Walsh-Hadamard transform.
 	fwht(dst[:padD])
 
-	// D₂: apply second random sign flip.
-	s2 := h.signs2
-	for i := range padD {
-		dst[i] *= s2[i]
-	}
+	// D₂: apply second random sign flip (NEON-accelerated).
+	distancer.VecMulF64(dst[:padD], dst[:padD], h.signs2)
 }
 
 // Unrotate computes the inverse: first d coordinates of D₁ · H̃ · D₂ · src.
@@ -95,18 +91,10 @@ func (h *HadamardRotator) Unrotate(dst, src []float64) {
 
 	copy(buf[:padD], src[:padD])
 
-	// Reverse order: D₂ first, then H̃, then D₁.
-	s2 := h.signs2
-	for i := range padD {
-		buf[i] *= s2[i]
-	}
-
+	// Reverse order: D₂ first, then H̃, then D₁ (NEON-accelerated).
+	distancer.VecMulF64(buf[:padD], buf[:padD], h.signs2)
 	fwht(buf)
-
-	s1 := h.signs1
-	for i := range padD {
-		buf[i] *= s1[i]
-	}
+	distancer.VecMulF64(buf[:padD], buf[:padD], h.signs1)
 
 	// Take first d coordinates.
 	copy(dst[:d], buf[:d])
