@@ -132,6 +132,49 @@ func (c *Collection) addCompressed(id, content string, indices []uint8, norm flo
 		}
 	}
 
+	// Maintain HNSW index incrementally.
+	if c.hnswIdx != nil && c.hnswVecs != nil {
+		// Decode the new vector's indices to float32 for NEON distance.
+		centroids32 := c.quantizer.Codebook().Centroids32
+		d := c.dim
+		newVec := make([]float32, d)
+		for j := range d {
+			newVec[j] = centroids32[indices[j]]
+		}
+		// Grow the decoded vectors slice.
+		c.hnswVecs = append(c.hnswVecs, newVec...)
+
+		// Insert into the graph. distFunc uses the decoded vectors.
+		hnswVecs := c.hnswVecs
+		c.hnswIdx.Insert(idx, func(a, b int) float32 {
+			return distancer.NegDot(hnswVecs[a*d:a*d+d], hnswVecs[b*d:b*d+d])
+		})
+	}
+
+	// Maintain IVF index incrementally: assign to nearest partition.
+	if c.ivfIdx != nil {
+		centroids32 := c.quantizer.Codebook().Centroids32
+		d := c.dim
+
+		// Compute the decoded vector for this new entry.
+		vec := make([]float64, d)
+		for j := range d {
+			vec[j] = float64(centroids32[indices[j]])
+		}
+
+		// Find nearest partition centroid.
+		best := 0
+		bestDot := -math.MaxFloat64
+		for p, centroid := range c.ivfIdx.centroids {
+			dot := distancer.DotF64(vec[:len(centroid)], centroid)
+			if dot > bestDot {
+				bestDot = dot
+				best = p
+			}
+		}
+		c.ivfIdx.partitions[best] = append(c.ivfIdx.partitions[best], idx)
+	}
+
 	c.mu.Unlock()
 }
 
@@ -257,6 +300,11 @@ func (c *Collection) Delete(ids ...string) error {
 		}
 		c.deleted[idx] = true
 		delete(c.idIndex, id)
+
+		// Mark deleted in HNSW (tombstone, skipped during search).
+		if c.hnswIdx != nil && idx < len(c.hnswIdx.deleted) {
+			c.hnswIdx.deleted[idx] = true
+		}
 	}
 	return nil
 }
